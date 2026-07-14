@@ -8,6 +8,7 @@ from app.routes.project_inventory import router as project_inventory_router
 from app.routes.git_admin import router as git_admin_router
 from app.routes.architecture import router as architecture_router
 from app.routes.architecture_graph import router as architecture_graph_router
+from app.routes.impact import router as impact_router
 from app.routes.dependencies import router as dependencies_router
 from app.routes.execute_goal import router as execute_goal_router
 from app.openapi_gpt import register_openapi_gpt
@@ -96,10 +97,12 @@ app.include_router(project_inventory_router)
 app.include_router(git_admin_router)
 app.include_router(architecture_router)
 app.include_router(architecture_graph_router)
+app.include_router(impact_router)
 app.include_router(dependencies_router)
 from app.routes.git_admin import router as git_admin_router
 from app.routes.architecture import router as architecture_router
 from app.routes.architecture_graph import router as architecture_graph_router
+from app.routes.impact import router as impact_router
 from app.routes.dependencies import router as dependencies_router
 app.include_router(execute_goal_router)
 register_openapi_gpt(app)
