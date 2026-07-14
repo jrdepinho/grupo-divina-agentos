@@ -1,0 +1,27 @@
+import app.runtime.capabilities
+from .planner import build_plan
+from .executor import execute_plan
+from .registry import register, list_capabilities
+
+def goal_echo(goal):
+    return {
+        "message":"Goal recebido",
+        "goal":goal
+    }
+
+register("goal.echo",goal_echo)
+
+def run_goal(goal,mode="execute",approval="auto",context=None):
+
+    plan=build_plan(goal)
+
+    results=execute_plan(plan)
+
+    return {
+        "ok":True,
+        "goal":goal,
+        "mode":mode,
+        "plan":plan,
+        "results":results,
+        "capabilities":list_capabilities()
+    }

@@ -1,0 +1,72 @@
+from pathlib import Path
+from .registry import register, runtime_catalog
+
+ROOT = Path("/opt/grupo-divina-dashboard")
+MEMORY = ROOT / "docs" / "project-memory"
+
+@register("catalog")
+def catalog(req):
+    return {
+        "ok": True,
+        "runtime": "agent-runtime-v1",
+        "operations": runtime_catalog()
+    }
+
+@register("bootstrap")
+def bootstrap(req):
+    docs = []
+    if MEMORY.exists():
+        docs = sorted(p.name for p in MEMORY.glob("*.md"))
+    return {
+        "ok": True,
+        "project_root": str(ROOT),
+        "project_memory": str(MEMORY),
+        "documents": docs
+    }
+
+@register("project_memory_read")
+def project_memory_read(req):
+    name = getattr(req, "path", None)
+    if not name:
+        return {
+            "ok": True,
+            "files": sorted(p.name for p in MEMORY.glob("*.md"))
+        }
+
+    p = (MEMORY / name).resolve()
+
+    if not str(p).startswith(str(MEMORY.resolve())):
+        return {"ok": False, "error": "invalid path"}
+
+    if not p.exists():
+        return {"ok": False, "error": "not found"}
+
+    return {
+        "ok": True,
+        "path": str(p),
+        "content": p.read_text(encoding="utf-8")
+    }
+
+@register("engineering_audit")
+def engineering_audit(req):
+    return {
+        "ok": True,
+        "status": "runtime ready",
+        "project_root": str(ROOT)
+    }
+
+@register("mission_next")
+def mission_next(req):
+    return {
+        "ok": True,
+        "message": "Mission planner placeholder"
+    }
+
+@register("continue")
+def continue_project(req):
+    return {
+        "ok": True,
+        "bootstrap": bootstrap(req),
+        "audit": engineering_audit(req),
+        "mission": mission_next(req)
+    }

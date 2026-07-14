@@ -1,0 +1,45 @@
+from __future__ import annotations
+
+from fastapi.routing import APIRoute
+
+from app.api import app
+from app.openapi import configure_openapi
+from app.openapi_gpt import register_openapi_gpt
+from app.routes.admin_secure import router as admin_secure_router
+from app.routes.deploy_secure import router as deploy_secure_router
+from app.routes.plan_secure import router as plan_secure_router
+from app.routes.config_secure import router as config_secure_router
+from app.routes.erp import router as erp_router
+from app.routes.erp_security import router as erp_security_router
+from app.routes.frontend_admin import router as frontend_admin_router
+from app.routes.compact import router as compact_router
+
+
+def _remove_route(method: str, path: str) -> None:
+    normalized_method = method.upper()
+    app.router.routes = [
+        route
+        for route in app.router.routes
+        if not (
+            isinstance(route, APIRoute)
+            and route.path == path
+            and normalized_method in (route.methods or set())
+        )
+    ]
+
+
+# Replaces older legacy endpoints with the V2 implementations.
+_remove_route("POST", "/admin/exec")
+_remove_route("POST", "/erp/sync-metadata")
+
+app.include_router(admin_secure_router)
+app.include_router(deploy_secure_router)
+app.include_router(plan_secure_router)
+app.include_router(config_secure_router)
+app.include_router(erp_router)
+app.include_router(erp_security_router)
+app.include_router(frontend_admin_router)
+app.include_router(compact_router)
+configure_openapi(app)
+register_openapi_gpt(app)
+

@@ -1,0 +1,169 @@
+from __future__ import annotations
+
+import datetime
+import json
+import os
+import subprocess
+import uuid
+from pathlib import Path
+from typing import Any, Callable
+
+from fastapi import HTTPException
+
+JOB_DIR = Path("/opt/agente-divina/logs/jobs")
+JOB_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _now() -> str:
+    return datetime.datetime.now().isoformat()
+
+
+def _job_paths(job_id: str) -> dict[str, Path]:
+    root = JOB_DIR / job_id
+    return {
+        "root": root,
+        "status": root / "status.json",
+        "stdout": root / "stdout.log",
+        "stderr": root / "stderr.log",
+        "exit": root / "exitcode.txt",
+        "script": root / "run.sh",
+    }
+
+
+def _read_status(job_id: str) -> dict[str, Any]:
+    paths = _job_paths(job_id)
+    if not paths["status"].exists():
+        raise HTTPException(404, f"job não encontrado: {job_id}")
+    status = json.loads(paths["status"].read_text(encoding="utf-8"))
+    exit_path = paths["exit"]
+    if exit_path.exists():
+        try:
+            exitcode = int(exit_path.read_text().strip())
+        except Exception:
+            exitcode = None
+        status["state"] = "completed" if exitcode == 0 else "failed"
+        status["exitcode"] = exitcode
+        if not status.get("finished_at"):
+            status["finished_at"] = _now()
+            paths["status"].write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+    return status
+
+
+def _tail(path: Path, limit: int = 8000) -> str:
+    if not path.exists():
+        return ""
+    data = path.read_text(errors="replace")
+    return data[-limit:]
+
+
+def _start_shell_job(name: str, command: str, cwd: str = "/opt/agente-divina-v2") -> dict[str, Any]:
+    job_id = f"{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    paths = _job_paths(job_id)
+    paths["root"].mkdir(parents=True, exist_ok=True)
+
+    script = f"""#!/usr/bin/env bash
+set -o pipefail
+cd {cwd!r}
+(
+  {command}
+)
+code=$?
+echo "$code" > {str(paths['exit'])!r}
+exit $code
+"""
+    paths["script"].write_text(script, encoding="utf-8")
+    paths["script"].chmod(0o700)
+
+    stdout = paths["stdout"].open("wb")
+    stderr = paths["stderr"].open("wb")
+    proc = subprocess.Popen(["bash", str(paths["script"])], stdout=stdout, stderr=stderr, start_new_session=True)
+    stdout.close()
+    stderr.close()
+
+    status = {
+        "ok": True,
+        "job_id": job_id,
+        "name": name,
+        "state": "running",
+        "pid": proc.pid,
+        "cwd": cwd,
+        "created_at": _now(),
+        "command": command,
+        "paths": {k: str(v) for k, v in paths.items()},
+    }
+    paths["status"].write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+    return status
+
+
+def _frontend_validate_command(run_frontend_build: bool = True) -> str:
+    build = "npm run build" if run_frontend_build else "echo 'SKIP frontend build'"
+    return f"""
+set -e
+echo '--- frontend build ---'
+cd /opt/grupo-divina-dashboard
+{build}
+
+echo '--- smoke test ---'
+TOKEN=$(grep AGENTE_ADMIN_TOKEN /opt/agente-divina/config/supabase.env | cut -d= -f2-)
+curl -s -X POST http://127.0.0.1:8000/admin/full-access \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{{"operation":"smoke_test"}}'
+
+echo
+echo '--- browser login ---'
+curl -s -X POST http://127.0.0.1:8000/admin/full-access \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{{"operation":"browser_flow","args":{{"flow":"login","login":"jrdepinho","password":"12345678","timeout":20000}}}}'
+
+echo
+echo '--- browser erp ---'
+curl -s -X POST http://127.0.0.1:8000/admin/full-access \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{{"operation":"browser_flow","args":{{"flow":"abrir_erp","timeout":20000}}}}'
+"""
+
+
+def handle_jobs_op(req: Any, run_cmd: Callable[..., dict[str, Any]] | None = None) -> dict[str, Any] | None:
+    op = req.operation
+    if op not in {"job_start", "job_status", "job_list", "frontend_validate_async", "frontend_execute_plan_async"}:
+        return None
+
+    args = req.args or {}
+
+    if op == "job_start":
+        command = str(args.get("command") or req.command or "")
+        if not command:
+            raise HTTPException(400, "command obrigatório")
+        cwd = str(args.get("cwd") or "/opt/agente-divina-v2")
+        return _start_shell_job(str(args.get("name") or "custom"), command, cwd)
+
+    if op in {"frontend_validate_async", "frontend_execute_plan_async"}:
+        run_frontend_build = bool(args.get("run_frontend_build", True))
+        return _start_shell_job("frontend_validate", _frontend_validate_command(run_frontend_build), "/opt/agente-divina-v2")
+
+    if op == "job_status":
+        job_id = str(args.get("job_id") or req.content or "")
+        if not job_id:
+            raise HTTPException(400, "job_id obrigatório")
+        status = _read_status(job_id)
+        paths = _job_paths(job_id)
+        return {
+            "ok": True,
+            "job": status,
+            "stdout_tail": _tail(paths["stdout"], int(args.get("limit") or req.limit or 8000)),
+            "stderr_tail": _tail(paths["stderr"], int(args.get("limit") or req.limit or 8000)),
+        }
+
+    if op == "job_list":
+        jobs = []
+        for status_path in sorted(JOB_DIR.glob("*/status.json"), reverse=True)[: int(req.limit or args.get("limit") or 50)]:
+            try:
+                jobs.append(_read_status(status_path.parent.name))
+            except Exception:
+                pass
+        return {"ok": True, "count": len(jobs), "jobs": jobs}
+
+    return None

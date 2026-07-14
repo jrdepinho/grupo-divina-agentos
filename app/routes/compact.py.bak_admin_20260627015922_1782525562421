@@ -1,0 +1,255 @@
+from __future__ import annotations
+
+import os
+import subprocess
+from typing import Any
+
+import psycopg2
+import psycopg2.extras
+import requests
+from fastapi import APIRouter, HTTPException, Security
+from fastapi.security import HTTPAuthorizationCredentials
+from pydantic import BaseModel, Field
+
+from app.auth import bearerAuth, verify_admin_token
+
+
+router = APIRouter()
+
+
+class CompactOperationRequest(BaseModel):
+    operation: str = Field(..., description="Nome da operação a executar dentro do domínio.")
+    data: dict[str, Any] = Field(default_factory=dict, description="Parâmetros da operação.")
+
+
+def _auth_header(credentials: HTTPAuthorizationCredentials | None) -> dict[str, str]:
+    verify_admin_token(credentials)
+    token = credentials.credentials if credentials else ""
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _local(method: str, path: str, credentials: HTTPAuthorizationCredentials | None, data: dict[str, Any] | None = None, timeout: int = 180) -> dict[str, Any]:
+    url = f"http://127.0.0.1:8050{path}"
+    headers = _auth_header(credentials)
+    try:
+        resp = requests.request(method.upper(), url, headers=headers, json=data if data is not None else None, timeout=timeout)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail={"erro": "falha em chamada local", "path": path, "detail": str(exc)}) from exc
+    try:
+        parsed = resp.json()
+    except Exception:
+        parsed = resp.text
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=resp.status_code, detail=parsed)
+    return parsed
+
+
+def _db_url() -> str:
+    value = os.getenv("SUPABASE_DB_URL")
+    if not value:
+        raise HTTPException(status_code=500, detail="SUPABASE_DB_URL não configurado")
+    return value
+
+
+def _select(sql: str, params: tuple[Any, ...] = (), limit: int = 500) -> list[dict[str, Any]]:
+    if not sql.strip().lower().startswith("select"):
+        raise HTTPException(status_code=400, detail="Apenas SELECT permitido nesta operação compacta")
+    with psycopg2.connect(_db_url()) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+            return [dict(row) for row in rows[:limit]]
+
+
+def _execute(sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+    with psycopg2.connect(_db_url()) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params)
+            if cur.description:
+                return [dict(row) for row in cur.fetchall()]
+            return []
+
+
+def _supabase_auth_config() -> tuple[str, str]:
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    if not url or not key:
+        raise HTTPException(status_code=500, detail="SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY não configurados")
+    return url.rstrip("/"), key
+
+
+def _supabase_auth_request(path: str, payload: dict[str, Any], timeout: int = 120) -> dict[str, Any]:
+    url, key = _supabase_auth_config()
+    try:
+        resp = requests.post(
+            f"{url}/auth/v1{path}",
+            headers={
+                "apikey": key,
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=timeout,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail={"erro": "falha ao chamar Supabase Auth", "detail": str(exc)}) from exc
+    try:
+        parsed = resp.json()
+    except Exception:
+        parsed = resp.text
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=resp.status_code, detail={"erro": "Supabase Auth retornou erro", "status": resp.status_code, "response": parsed})
+    return {"ok": True, "status": resp.status_code, "response": parsed}
+
+
+@router.post(
+    "/admin",
+    summary="Executar operação administrativa compacta",
+    description=(
+        "Endpoint compacto para o GPT executar operações administrativas. "
+        "Operações: plan_execute, catalog, diagnose, validate_v2, nightly_health, "
+        "config_summary, capabilities, service_status, service_logs, service_restart, "
+        "nginx_test, nginx_reload."
+    ),
+)
+def compact_admin(
+    payload: CompactOperationRequest,
+    credentials: HTTPAuthorizationCredentials | None = Security(bearerAuth),
+):
+    operation = str(payload.operation or "").strip().lower()
+    data = payload.data or {}
+    _auth_header(credentials)
+
+    if operation in {"catalog", "diagnose", "validate_v2", "restart_v2", "backup_v2", "deploy_v2", "rollback_v2", "nightly_health"}:
+        body = {"plan": operation, **data}
+        return _local("POST", "/admin/plan/execute", credentials, body)
+
+    if operation == "plan_execute":
+        return _local("POST", "/admin/plan/execute", credentials, data)
+    if operation == "config_summary":
+        return _local("GET", "/admin/config/summary", credentials)
+    if operation == "capabilities":
+        return _local("GET", "/admin/capabilities", credentials)
+    if operation == "service_status":
+        return _local("POST", "/admin/service/status", credentials, data)
+    if operation == "service_logs":
+        return _local("POST", "/admin/service/logs", credentials, data)
+    if operation == "service_restart":
+        return _local("POST", "/admin/service/restart", credentials, data)
+    if operation == "nginx_test":
+        return _local("POST", "/admin/nginx/test", credentials, {})
+    if operation == "nginx_reload":
+        return _local("POST", "/admin/nginx/reload", credentials, {})
+
+    raise HTTPException(status_code=400, detail={"erro": "operação administrativa não suportada", "operation": operation})
+
+
+@router.post(
+    "/erp",
+    summary="Executar operação compacta do ERP",
+    description=(
+        "Endpoint compacto para operações do ERP. Operações: sync_metadata, "
+        "modules_summary, tables_by_module, table_columns, select."
+    ),
+)
+def compact_erp(
+    payload: CompactOperationRequest,
+    credentials: HTTPAuthorizationCredentials | None = Security(bearerAuth),
+):
+    operation = str(payload.operation or "").strip().lower()
+    data = payload.data or {}
+    _auth_header(credentials)
+
+    if operation == "sync_metadata":
+        return _local("POST", "/erp/sync-metadata", credentials, data)
+    if operation == "modules_summary":
+        rows = _select("select module_name, count(*) as tables_count from public.erp_metadata_tables group by module_name order by tables_count desc")
+        return {"ok": True, "modules": rows}
+    if operation == "tables_by_module":
+        module = data.get("module_name")
+        if module:
+            rows = _select("select schema_name, table_name, business_name, description, criticality, source_type from public.erp_metadata_tables where module_name=%s order by table_name", (module,))
+        else:
+            rows = _select("select schema_name, table_name, module_name, business_name, description, criticality, source_type from public.erp_metadata_tables order by module_name, table_name")
+        return {"ok": True, "count": len(rows), "tables": rows}
+    if operation == "table_columns":
+        table = data.get("table_name")
+        schema = data.get("schema_name", "public")
+        if not table:
+            raise HTTPException(status_code=400, detail="table_name obrigatório")
+        rows = _select("select column_name, data_type, business_name, description, is_required, is_primary_key, is_foreign_key from public.erp_metadata_columns where schema_name=%s and table_name=%s order by column_name", (schema, table))
+        return {"ok": True, "table_name": table, "count": len(rows), "columns": rows}
+    if operation == "select":
+        sql = str(data.get("sql") or "")
+        limit = int(data.get("limit") or 500)
+        return {"ok": True, "rows": _select(sql, limit=max(1, min(limit, 500)))}
+
+    raise HTTPException(status_code=400, detail={"erro": "operação ERP não suportada", "operation": operation})
+
+
+@router.post(
+    "/fiscal",
+    summary="Executar operação fiscal compacta",
+    description="Endpoint compacto para Fiscal/XML/SEFAZ. Operações: nsu, processar_xml, sefaz_hogar, sefaz_ttf, auditoria_dashboard, auditoria_importacao.",
+)
+def compact_fiscal(
+    payload: CompactOperationRequest,
+    credentials: HTTPAuthorizationCredentials | None = Security(bearerAuth),
+):
+    operation = str(payload.operation or "").strip().lower()
+    data = payload.data or {}
+    _auth_header(credentials)
+
+    if operation == "nsu":
+        return _local("GET", "/nsu", credentials)
+    if operation == "processar_xml":
+        return _local("POST", "/processar-xml", credentials, {})
+    if operation == "sefaz_hogar":
+        return _local("POST", "/sefaz/hogar", credentials, {})
+    if operation == "sefaz_ttf":
+        return _local("POST", "/sefaz/ttf", credentials, {})
+    if operation == "auditoria_dashboard":
+        return _local("GET", "/auditoria_dashboard", credentials)
+    if operation == "auditoria_importacao":
+        chave = data.get("chave_nfe")
+        if not chave:
+            raise HTTPException(status_code=400, detail="chave_nfe obrigatória")
+        return _local("GET", f"/auditoria_importacao/{chave}", credentials)
+
+    raise HTTPException(status_code=400, detail={"erro": "operação fiscal não suportada", "operation": operation})
+
+
+@router.post(
+    "/supabase",
+    summary="Executar operação compacta do Supabase",
+    description="Endpoint compacto para Supabase. Operações: admin_sql, select, metadata_counts.",
+)
+def compact_supabase(
+    payload: CompactOperationRequest,
+    credentials: HTTPAuthorizationCredentials | None = Security(bearerAuth),
+):
+    operation = str(payload.operation or "").strip().lower()
+    data = payload.data or {}
+    _auth_header(credentials)
+
+    if operation == "admin_sql":
+        return _local("POST", "/supabase/admin/sql", credentials, data, timeout=240)
+    if operation == "select":
+        sql = str(data.get("sql") or "")
+        limit = int(data.get("limit") or 500)
+        return {"ok": True, "rows": _select(sql, limit=max(1, min(limit, 500)))}
+    if operation == "metadata_counts":
+        rows = _select(
+            """
+            select
+              (select count(*) from public.erp_metadata_tables) as metadata_tables,
+              (select count(*) from public.erp_metadata_columns) as metadata_columns,
+              (select count(*) from public.erp_relationships) as relationships,
+              (select count(*) from public.erp_usuarios) as usuarios,
+              (select count(*) from public.erp_perfis) as perfis,
+              (select count(*) from public.erp_permissoes) as permissoes
+            """
+        )
+        return {"ok": True, "counts": rows[0] if rows else {}}
+
+    raise HTTPException(status_code=400, detail={"erro": "operação Supabase não suportada", "operation": operation})

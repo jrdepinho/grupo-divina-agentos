@@ -1,0 +1,162 @@
+from __future__ import annotations
+
+import datetime
+from pathlib import Path
+from typing import Any
+
+from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
+
+SCREENSHOT_DIR = Path("/opt/agente-divina/logs/browser_screenshots")
+EVIDENCE_DIR = Path("/opt/agente-divina/logs/browser_evidence")
+SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+
+DEFAULT_BASE_URL = "https://grupo-divina-dashboard.vercel.app"
+
+
+def _timestamp() -> str:
+    return datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+
+
+def _save_evidence(page: Page, flow: str, label: str) -> dict[str, Any]:
+    stamp = _timestamp()
+    safe_flow = flow.replace("/", "_").replace(" ", "_")
+    safe_label = label.replace("/", "_").replace(" ", "_")
+    screenshot_path = SCREENSHOT_DIR / f"{safe_flow}-{safe_label}-{stamp}.png"
+    html_path = EVIDENCE_DIR / f"{safe_flow}-{safe_label}-{stamp}.html"
+    page.screenshot(path=str(screenshot_path), full_page=True)
+    html_path.write_text(page.content(), encoding="utf-8")
+    return {"screenshot": str(screenshot_path), "html": str(html_path)}
+
+
+def _goto(page: Page, url: str, timeout: int) -> dict[str, Any]:
+    response = page.goto(url, wait_until="networkidle", timeout=timeout)
+    return {"url": url, "status": response.status if response else None, "ok": bool(response and response.ok)}
+
+
+def flow_login(page: Page, args: dict[str, Any], timeout: int) -> dict[str, Any]:
+    base_url = str(args.get("base_url") or DEFAULT_BASE_URL).rstrip("/")
+    url = str(args.get("url") or f"{base_url}/auth/login")
+    login = str(args.get("login") or "jrdepinho")
+    password = str(args.get("password") or "12345678")
+
+    steps: list[dict[str, Any]] = []
+    steps.append({"step": "goto", **_goto(page, url, timeout)})
+    page.fill("input[autocomplete='username']", login, timeout=timeout)
+    steps.append({"step": "fill_login", "ok": True})
+    page.fill("input[autocomplete='current-password']", password, timeout=timeout)
+    steps.append({"step": "fill_password", "ok": True})
+    page.click("button[type='submit']", timeout=timeout)
+    steps.append({"step": "submit", "ok": True})
+    page.wait_for_timeout(int(args.get("wait_ms") or 3000))
+
+    ok = "/erp" in page.url
+    evidence = _save_evidence(page, "login", "final")
+    return {
+        "ok": ok,
+        "flow": "login",
+        "current_url": page.url,
+        "title": page.title(),
+        "steps": steps,
+        "evidence": evidence,
+    }
+
+
+def flow_open_page(page: Page, args: dict[str, Any], timeout: int, path: str, name: str) -> dict[str, Any]:
+    base_url = str(args.get("base_url") or DEFAULT_BASE_URL).rstrip("/")
+    url = str(args.get("url") or f"{base_url}{path}")
+    steps = [{"step": "goto", **_goto(page, url, timeout)}]
+    page.wait_for_timeout(int(args.get("wait_ms") or 1000))
+    text = page.text_content("body", timeout=timeout) or ""
+    evidence = _save_evidence(page, name, "final")
+    return {
+        "ok": bool(steps[0].get("ok")),
+        "flow": name,
+        "current_url": page.url,
+        "title": page.title(),
+        "text_preview": text[:1000],
+        "steps": steps,
+        "evidence": evidence,
+    }
+
+
+def run_named_flow(page: Page, flow: str, args: dict[str, Any], timeout: int) -> dict[str, Any]:
+    flow = str(flow or "").strip().lower()
+    if flow == "login":
+        return flow_login(page, args, timeout)
+    if flow in {"abrir_erp", "erp"}:
+        return flow_open_page(page, args, timeout, "/erp", "abrir_erp")
+    if flow in {"abrir_produtos", "produtos"}:
+        return flow_open_page(page, args, timeout, "/erp/produtos", "abrir_produtos")
+    if flow in {"abrir_financeiro", "financeiro"}:
+        return flow_open_page(page, args, timeout, "/erp/financeiro", "abrir_financeiro")
+    if flow in {"abrir_xml", "xml"}:
+        return flow_open_page(page, args, timeout, "/erp/fiscal/xml-recebidos", "abrir_xml")
+    if flow in {"abrir_fiscal", "fiscal"}:
+        return flow_open_page(page, args, timeout, "/erp/fiscal", "abrir_fiscal")
+    if flow in {"abrir_seguranca", "seguranca"}:
+        return flow_open_page(page, args, timeout, "/erp/seguranca", "abrir_seguranca")
+    if flow in {"abrir_usuarios", "usuarios", "seguranca_usuarios"}:
+        return flow_open_page(page, args, timeout, "/erp/seguranca/usuarios", "abrir_usuarios")
+    if flow in {"seguranca_usuarios_validar", "validar_usuarios_seguranca"}:
+        result = flow_open_page(page, args, timeout, "/erp/seguranca/usuarios", "seguranca_usuarios_validar")
+        text = result.get("text_preview", "")
+        result["assertions"] = {
+            "has_usuarios_title": "Usuários" in text,
+            "has_rodrigo_or_email": ("RODRIGO" in text) or ("jrdepinho@divinahomepy.com" in text),
+            "has_acessos_action": "Acessos" in text,
+        }
+        result["ok"] = bool(result.get("ok")) and all(result["assertions"].values())
+        return result
+    if flow in {"seguranca_perfis_validar", "validar_perfis_seguranca"}:
+        result = flow_open_page(page, args, timeout, "/erp/seguranca/perfis", "seguranca_perfis_validar")
+        text = result.get("text_preview", "")
+        result["assertions"] = {
+            "has_perfis_title": "Perfis" in text,
+            "has_admin_or_consulta": ("Administrador ERP" in text) or ("Consulta" in text),
+            "has_novo_perfil": "Novo perfil" in text,
+        }
+        result["ok"] = bool(result.get("ok")) and all(result["assertions"].values())
+        return result
+    if flow in {"seguranca_permissoes_validar", "validar_permissoes_seguranca"}:
+        result = flow_open_page(page, args, timeout, "/erp/seguranca/permissoes", "seguranca_permissoes_validar")
+        text = result.get("text_preview", "")
+        result["assertions"] = {
+            "has_permissoes_title": "Permissões" in text,
+            "has_codigo_column": "Código" in text,
+            "has_modulo_content": len(text.strip()) > 100,
+        }
+        result["ok"] = bool(result.get("ok")) and all(result["assertions"].values())
+        return result
+    if flow in {"abrir_fornecedores", "fornecedores"}:
+        return flow_open_page(page, args, timeout, "/erp/cadastros/fornecedores", "abrir_fornecedores")
+    if flow in {"abrir_clientes", "clientes"}:
+        return flow_open_page(page, args, timeout, "/erp/cadastros/clientes", "abrir_clientes")
+    if flow in {"abrir_compras", "compras"}:
+        return flow_open_page(page, args, timeout, "/erp/compras", "abrir_compras")
+    if flow in {"abrir_estoque", "estoque"}:
+        return flow_open_page(page, args, timeout, "/erp/estoque", "abrir_estoque")
+    if flow in {"abrir_producao", "producao"}:
+        return flow_open_page(page, args, timeout, "/erp/producao", "abrir_producao")
+    raise ValueError(f"fluxo de navegador não suportado: {flow}")
+
+
+def available_flows() -> list[str]:
+    return [
+        "login",
+        "abrir_erp",
+        "abrir_produtos",
+        "abrir_financeiro",
+        "abrir_fiscal",
+        "abrir_xml",
+        "abrir_seguranca",
+        "abrir_usuarios",
+        "seguranca_usuarios_validar",
+        "seguranca_perfis_validar",
+        "seguranca_permissoes_validar",
+        "abrir_fornecedores",
+        "abrir_clientes",
+        "abrir_compras",
+        "abrir_estoque",
+        "abrir_producao",
+    ]

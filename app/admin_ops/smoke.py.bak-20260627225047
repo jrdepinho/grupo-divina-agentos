@@ -1,0 +1,40 @@
+from __future__ import annotations
+
+from typing import Any, Callable
+
+
+def _run(run_cmd: Callable[..., dict[str, Any]], name: str, command: str, cwd: str):
+    result = run_cmd(command, cwd=cwd)
+    return {
+        "name": name,
+        "ok": result.get("returncode") == 0,
+        "returncode": result.get("returncode"),
+        "stdout": result.get("stdout", ""),
+        "stderr": result.get("stderr", ""),
+    }
+
+
+def handle_smoke_op(req: Any, run_cmd: Callable[..., dict[str, Any]]):
+    if req.operation not in {"smoke_test", "health_suite", "project_smoke_test"}:
+        return None
+
+    steps = [
+        _run(
+            run_cmd,
+            "backend_service_active",
+            "systemctl is-active agente-divina-v2.service",
+            "/opt/agente-divina-v2",
+        )
+    ]
+
+    ok = all(step["ok"] for step in steps)
+
+    return {
+        "ok": ok,
+        "summary": {
+            "total": len(steps),
+            "passed": sum(1 for s in steps if s["ok"]),
+            "failed": sum(1 for s in steps if not s["ok"]),
+        },
+        "steps": steps,
+    }

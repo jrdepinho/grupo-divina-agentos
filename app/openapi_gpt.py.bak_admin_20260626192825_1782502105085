@@ -1,0 +1,72 @@
+from copy import deepcopy
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+GPT_ALLOWED_PATHS = {
+    "/status",
+    "/health",
+    "/runtime",
+    "/health/full",
+    "/version",
+    "/nsu",
+    "/processar-xml",
+    "/sefaz/hogar",
+    "/sefaz/ttf",
+    "/supabase/teste",
+    "/supabase/admin/sql",
+    "/auditoria_dashboard",
+    "/auditoria_importacao/{chave_nfe}",
+    "/erp/sync-metadata",
+
+    "/admin/file/read",
+    "/admin/file/write",
+    "/admin/file/patch",
+    "/admin/file/list",
+    "/admin/exec",
+    "/admin/service/status",
+    "/admin/service/restart",
+    "/admin/service/logs",
+    "/admin/service/start",
+    "/admin/service/stop",
+    "/admin/service/enable",
+    "/admin/service/disable",
+    "/admin/nginx/test",
+    "/admin/nginx/reload",
+    "/admin/deploy/validate",
+}
+
+def register_openapi_gpt(app):
+    @app.get("/openapi-gpt.json", include_in_schema=False)
+    def openapi_gpt(request: Request):
+        schema = deepcopy(request.app.openapi())
+
+        schema["paths"] = {
+            path: item
+            for path, item in schema.get("paths", {}).items()
+            if path in GPT_ALLOWED_PATHS
+        }
+
+        for path_item in schema.get("paths", {}).values():
+            for operation in path_item.values():
+                if isinstance(operation, dict):
+                    operation.pop("parameters", None)
+                    operation["security"] = [{"bearerAuth": []}]
+
+        used_refs = set()
+        for path_item in schema["paths"].values():
+            for operation in path_item.values():
+                if isinstance(operation, dict):
+                    body = str(operation)
+                    for name in schema.get("components", {}).get("schemas", {}).keys():
+                        if f"#/components/schemas/{name}" in body:
+                            used_refs.add(name)
+
+        components = schema.setdefault("components", {})
+        schemas = components.get("schemas", {})
+        components["schemas"] = {
+            name: value
+            for name, value in schemas.items()
+            if name in used_refs or name in {"HTTPValidationError", "ValidationError"}
+        }
+
+        return JSONResponse(schema)

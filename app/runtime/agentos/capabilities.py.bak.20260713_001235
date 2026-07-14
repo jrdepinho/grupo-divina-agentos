@@ -1,0 +1,21 @@
+from app.runtime.agentos.registry import Capability, register
+
+
+def goal_echo(goal):
+    return {
+        "ok": True,
+        "action": "goal.echo",
+        "result": {
+            "message": "Goal recebido",
+            "goal": goal,
+        },
+    }
+
+
+register(
+    Capability(
+        name="goal.echo",
+        description="Echo de teste",
+        handler=goal_echo,
+    )
+)

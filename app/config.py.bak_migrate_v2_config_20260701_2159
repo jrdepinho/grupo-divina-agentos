@@ -1,0 +1,33 @@
+"""Configuration helpers for the Agente Divina API.
+
+The original API reads env files at request time. These helpers preserve that
+behavior instead of caching values at import time.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Mapping
+
+from dotenv import dotenv_values
+
+
+API_ENV_PATH = Path("/opt/agente-divina/config/api.env")
+SUPABASE_ENV_PATH = Path("/opt/agente-divina/config/supabase.env")
+APP_CWD = "/opt/agente-divina/app"
+DASHBOARD_CWD = "/opt/grupo-divina-dashboard"
+FORNECEDORES_CWD = "/opt/agente-fornecedores"
+
+
+def load_api_config() -> Mapping[str, str | None]:
+    return dotenv_values(API_ENV_PATH)
+
+
+def load_supabase_config() -> Mapping[str, str | None]:
+    return dotenv_values(SUPABASE_ENV_PATH)
+
+
+def get_env(name: str) -> str | None:
+    return os.getenv(name)
+

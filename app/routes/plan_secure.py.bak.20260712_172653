@@ -1,0 +1,405 @@
+from __future__ import annotations
+
+import json
+import subprocess
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Literal
+
+from fastapi import APIRouter, HTTPException, Security
+from fastapi.security import HTTPAuthorizationCredentials
+from pydantic import BaseModel, Field
+
+from app.auth import bearerAuth, verify_admin_token
+
+
+router = APIRouter()
+
+AUDIT_LOG = Path("/opt/agente-divina/logs/admin_actions.log")
+BACKUP_DIR = Path("/opt/agente-divina/backups")
+ALLOWED_DEPLOY_ROOT = Path("/opt/agente-divina-v2")
+ALLOWED_SERVICES = (
+    "agente-divina-api.service",
+    "agente-divina-v2.service",
+    "nginx.service",
+)
+PLAN_CATALOG = {
+    "catalog": {
+        "description": "Lista os planos operacionais disponíveis.",
+        "changes_environment": False,
+        "required": [],
+        "optional": ["include_logs", "log_lines"],
+        "example": {"plan": "catalog"},
+    },
+    "diagnose": {
+        "description": "Diagnóstico geral: serviços, Nginx, health checks e logs opcionais.",
+        "changes_environment": False,
+        "required": [],
+        "optional": ["include_logs", "log_lines"],
+        "example": {"plan": "diagnose", "include_logs": True, "log_lines": 80},
+    },
+    "validate_v2": {
+        "description": "Valida a V2 compilando módulos críticos e consultando o OpenAPI GPT.",
+        "changes_environment": False,
+        "required": [],
+        "optional": [],
+        "example": {"plan": "validate_v2"},
+    },
+    "restart_v2": {
+        "description": "Reinicia a V2 e valida status, health e logs.",
+        "changes_environment": True,
+        "requires_confirmation": True,
+        "required": [],
+        "optional": ["include_logs", "log_lines"],
+        "example": {"plan": "restart_v2", "include_logs": True, "log_lines": 80},
+    },
+    "backup_v2": {
+        "description": "Gera um pacote .tar.gz de backup da V2.",
+        "changes_environment": True,
+        "requires_confirmation": True,
+        "required": [],
+        "optional": ["label"],
+        "example": {"plan": "backup_v2", "label": "manual"},
+    },
+    "deploy_v2": {
+        "description": "Fluxo seguro de deploy: backup, validação do pacote informado, aplicação, compilação e restart.",
+        "changes_environment": True,
+        "requires_confirmation": True,
+        "required": ["package_path"],
+        "optional": ["include_logs", "log_lines"],
+        "example": {"plan": "deploy_v2", "package_path": "/opt/agente-divina/backups/pacote.tar.gz"},
+    },
+    "rollback_v2": {
+        "description": "Fluxo seguro de rollback: aplica backup informado, compila, reinicia e valida health.",
+        "changes_environment": True,
+        "requires_confirmation": True,
+        "required": ["backup_path"],
+        "optional": ["include_logs", "log_lines"],
+        "example": {"plan": "rollback_v2", "backup_path": "/opt/agente-divina/backups/backup.tar.gz"},
+    },
+    "nightly_health": {
+        "description": "Auditoria leve para monitoramento recorrente sem logs extensos.",
+        "changes_environment": False,
+        "required": [],
+        "optional": [],
+        "example": {"plan": "nightly_health"},
+    },
+    "daily_operations_report": {
+        "description": "Relatório diário consolidado com infraestrutura, auditoria, ERP, XML, SEFAZ e Supabase.",
+        "changes_environment": False,
+        "required": [],
+        "optional": ["include_logs", "log_lines"],
+        "example": {"plan": "daily_operations_report", "include_logs": False},
+    },
+    "fiscal_health": {
+        "description": "Diagnóstico fiscal com XML, SEFAZ/Hogar, SEFAZ/TTF e auditorias fiscais disponíveis.",
+        "changes_environment": False,
+        "required": [],
+        "optional": [],
+        "example": {"plan": "fiscal_health"},
+    },
+    "products_fiscal_audit": {
+        "description": "Auditoria operacional de metadados ERP/Supabase para apoiar revisão fiscal de produtos.",
+        "changes_environment": False,
+        "required": [],
+        "optional": [],
+        "example": {"plan": "products_fiscal_audit"},
+    },
+}
+
+
+class AdminPlanExecuteRequest(BaseModel):
+    plan: Literal[
+        "catalog",
+        "diagnose",
+        "validate_v2",
+        "restart_v2",
+        "backup_v2",
+        "deploy_v2",
+        "rollback_v2",
+        "nightly_health",
+        "daily_operations_report",
+        "fiscal_health",
+        "products_fiscal_audit",
+    ] = Field(
+        ...,
+        description=(
+            "Plano operacional a executar. Use 'catalog' para listar os planos disponíveis; "
+            "'diagnose' para diagnosticar o ambiente; 'validate_v2' para validar a V2; "
+            "'restart_v2' para reiniciar a V2; 'backup_v2' para gerar backup; "
+            "'deploy_v2' para aplicar pacote; 'rollback_v2' para restaurar backup; "
+            "'nightly_health' para auditoria leve."
+        ),
+    )
+    include_logs: bool = Field(default=True, description="Inclui logs recentes quando o plano suportar logs.")
+    log_lines: int = Field(default=80, ge=1, le=300, description="Quantidade de linhas de log a retornar.")
+    package_path: str | None = Field(default=None, description="Caminho do pacote .tar.gz para o plano deploy_v2.")
+    backup_path: str | None = Field(default=None, description="Caminho do backup .tar.gz para o plano rollback_v2.")
+    label: str = Field(default="manual", description="Rótulo usado na geração de backup pelo plano backup_v2.")
+
+
+def _require_admin(credentials: HTTPAuthorizationCredentials | None) -> None:
+    verify_admin_token(credentials)
+
+
+def _audit(action: str, detail: dict[str, Any]) -> None:
+    event = {"timestamp": datetime.utcnow().isoformat(), "action": action, "detail": detail}
+    try:
+        AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with AUDIT_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _run(tokens: list[str], cwd: str = "/tmp", timeout: int = 60) -> dict[str, Any]:
+    proc = subprocess.run(tokens, shell=False, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    return {
+        "ok": proc.returncode == 0,
+        "cmd": " ".join(tokens),
+        "cwd": cwd,
+        "exit_code": proc.returncode,
+        "stdout": proc.stdout[-20000:],
+        "stderr": proc.stderr[-20000:],
+    }
+
+
+def _safe_label(label: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in str(label or "manual"))
+    return cleaned.strip("-")[:60] or "manual"
+
+
+def _timestamp() -> str:
+    return datetime.utcnow().strftime("%Y%m%d%H%M%S")
+
+
+def _package_allowed(path: Path) -> bool:
+    resolved = path.resolve()
+    allowed_roots = (BACKUP_DIR.resolve(), (ALLOWED_DEPLOY_ROOT / "packages").resolve())
+    return any(resolved == root or root in resolved.parents for root in allowed_roots)
+
+
+def _validate_package_path(raw_path: str | None, field_name: str) -> Path:
+    if not raw_path:
+        raise HTTPException(status_code=400, detail=f"{field_name} obrigatório para este plano")
+    path = Path(raw_path).expanduser().resolve()
+    if not _package_allowed(path):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "erro": f"{field_name} fora dos diretórios permitidos",
+                "path": str(path),
+                "allowed_roots": [str(BACKUP_DIR), str(ALLOWED_DEPLOY_ROOT / "packages")],
+            },
+        )
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail={"erro": f"{field_name} não encontrado", "path": str(path)})
+    if not str(path).endswith((".tar.gz", ".tgz")):
+        raise HTTPException(status_code=400, detail=f"{field_name} deve ser .tar.gz ou .tgz")
+    return path
+
+
+def _service_status(service: str) -> dict[str, Any]:
+    return _run(["systemctl", "is-active", service], timeout=20)
+
+
+def _service_logs(service: str, lines: int) -> dict[str, Any]:
+    return _run(["journalctl", "-u", service, "-n", str(lines), "--no-pager"], timeout=60)
+
+
+def _health_checks() -> dict[str, Any]:
+    return {
+        "v1_8000": _run(["curl", "-sS", "http://127.0.0.1:8000/health"], timeout=30),
+        "v2_8050": _run(["curl", "-sS", "http://127.0.0.1:8050/health"], timeout=30),
+    }
+
+
+def _diagnose(include_logs: bool, log_lines: int) -> dict[str, Any]:
+    services = {service: _service_status(service) for service in ALLOWED_SERVICES}
+    nginx_test = _run(["nginx", "-t"], timeout=60)
+    health = _health_checks()
+    logs = {}
+    if include_logs:
+        logs = {service: _service_logs(service, min(log_lines, 120)) for service in ALLOWED_SERVICES}
+    ok = all(item["ok"] and item["stdout"].strip() == "active" for item in services.values()) and nginx_test["ok"]
+    return {"ok": ok, "plan": "diagnose", "services": services, "nginx_test": nginx_test, "health": health, "logs": logs}
+
+
+def _validate_v2() -> dict[str, Any]:
+    files = [
+        "app/main.py",
+        "app/routes/admin_secure.py",
+        "app/routes/deploy_secure.py",
+        "app/routes/plan_secure.py",
+        "app/openapi_gpt.py",
+    ]
+    results = {file: _run(["python3", "-m", "py_compile", file], cwd=str(ALLOWED_DEPLOY_ROOT), timeout=120) for file in files}
+    results["openapi_gpt"] = _run(["curl", "-sS", "http://127.0.0.1:8050/openapi-gpt.json"], timeout=60)
+    return {"ok": all(item["ok"] for item in results.values()), "plan": "validate_v2", "results": results}
+
+
+def _restart_v2(include_logs: bool, log_lines: int) -> dict[str, Any]:
+    restart = _run(["systemctl", "restart", "agente-divina-v2.service"], timeout=120)
+    status = _service_status("agente-divina-v2.service")
+    health = _run(["curl", "-sS", "http://127.0.0.1:8050/health"], timeout=30)
+    logs = _service_logs("agente-divina-v2.service", log_lines) if include_logs else None
+    return {
+        "ok": status["ok"] and status["stdout"].strip() == "active" and health["ok"],
+        "plan": "restart_v2",
+        "restart": restart,
+        "status": status,
+        "health": health,
+        "logs": logs,
+    }
+
+
+def _backup_v2(label: str) -> dict[str, Any]:
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    package = BACKUP_DIR / f"agente-divina-v2-{_safe_label(label)}-{_timestamp()}.tar.gz"
+    result = _run(["tar", "-czf", str(package), "--exclude=venv", "--exclude=__pycache__", "--exclude=packages", "agente-divina-v2"], cwd="/opt", timeout=240)
+    return {"ok": result["ok"], "plan": "backup_v2", "package": str(package), "result": result}
+
+
+def _deploy_v2(package_path: str | None, include_logs: bool, log_lines: int) -> dict[str, Any]:
+    package = _validate_package_path(package_path, "package_path")
+    backup = _backup_v2("pre-deploy")
+    if not backup["ok"]:
+        return {"ok": False, "plan": "deploy_v2", "erro": "backup pré-deploy falhou", "backup": backup}
+    extract = _run(["tar", "-xzf", str(package), "-C", "/opt"], timeout=240)
+    validate = _validate_v2()
+    restart = _restart_v2(include_logs, log_lines) if validate["ok"] else None
+    ok = extract["ok"] and validate["ok"] and bool(restart and restart["ok"])
+    return {"ok": ok, "plan": "deploy_v2", "package": str(package), "backup": backup, "extract": extract, "validate": validate, "restart": restart}
+
+
+def _rollback_v2(backup_path: str | None, include_logs: bool, log_lines: int) -> dict[str, Any]:
+    backup = _validate_package_path(backup_path, "backup_path")
+    safety_backup = _backup_v2("pre-rollback")
+    if not safety_backup["ok"]:
+        return {"ok": False, "plan": "rollback_v2", "erro": "backup de segurança pré-rollback falhou", "safety_backup": safety_backup}
+    extract = _run(["tar", "-xzf", str(backup), "-C", "/opt"], timeout=240)
+    validate = _validate_v2()
+    restart = _restart_v2(include_logs, log_lines) if validate["ok"] else None
+    ok = extract["ok"] and validate["ok"] and bool(restart and restart["ok"])
+    return {"ok": ok, "plan": "rollback_v2", "rollback_from": str(backup), "safety_backup": safety_backup, "extract": extract, "validate": validate, "restart": restart}
+
+
+def _local_api(method: str, path: str, timeout: int = 90) -> dict[str, Any]:
+    method = method.upper()
+    url = f"http://127.0.0.1:8050{path}"
+    tokens = ["curl", "-sS", "-X", method, url]
+    return _run(tokens, timeout=timeout)
+
+
+def _parse_json_result(result: dict[str, Any]) -> dict[str, Any]:
+    stdout = str(result.get("stdout") or "")
+    if not stdout.strip():
+        return {"parsed": None, "parse_error": "stdout vazio"}
+    try:
+        return {"parsed": json.loads(stdout), "parse_error": None}
+    except Exception as exc:
+        return {"parsed": None, "parse_error": str(exc), "raw": stdout[-2000:]}
+
+
+def _business_check(name: str, method: str, path: str, timeout: int = 90) -> dict[str, Any]:
+    result = _local_api(method, path, timeout=timeout)
+    parsed = _parse_json_result(result)
+    return {"name": name, "method": method, "path": path, "ok": result["ok"], "result": result, **parsed}
+
+
+def _fiscal_health() -> dict[str, Any]:
+    checks = {
+        "xml_processar": _business_check("processar_xml", "POST", "/processar-xml", timeout=120),
+        "sefaz_hogar": _business_check("sefaz_hogar", "POST", "/sefaz/hogar", timeout=120),
+        "sefaz_ttf": _business_check("sefaz_ttf", "POST", "/sefaz/ttf", timeout=120),
+        "auditoria_dashboard": _business_check("auditoria_dashboard", "GET", "/auditoria_dashboard", timeout=90),
+    }
+    ok = all(item["ok"] for item in checks.values())
+    warnings = [name for name, item in checks.items() if not item["ok"] or item.get("parse_error")]
+    return {"ok": ok, "plan": "fiscal_health", "checks": checks, "warnings": warnings}
+
+
+def _products_fiscal_audit() -> dict[str, Any]:
+    checks = {
+        "erp_sync_metadata": _business_check("erp_sync_metadata", "POST", "/erp/sync-metadata", timeout=180),
+        "supabase_teste": _business_check("supabase_teste", "POST", "/supabase/teste", timeout=90),
+    }
+    ok = all(item["ok"] for item in checks.values())
+    return {
+        "ok": ok,
+        "plan": "products_fiscal_audit",
+        "scope": "metadados ERP/Supabase disponíveis para orientar auditoria fiscal de produtos",
+        "checks": checks,
+        "limitations": [
+            "Este plano valida disponibilidade e metadados. A análise item a item de NCM/CEST/origem depende de endpoint específico de produtos ou consulta SQL segura."
+        ],
+    }
+
+
+def _daily_operations_report(include_logs: bool, log_lines: int) -> dict[str, Any]:
+    infrastructure = _diagnose(include_logs=False, log_lines=min(log_lines, 40))
+    fiscal = _fiscal_health()
+    products = _products_fiscal_audit()
+    nightly = _diagnose(False, 20)
+    ok = infrastructure["ok"] and fiscal["ok"] and products["ok"] and nightly["ok"]
+    logs = {service: _service_logs(service, min(log_lines, 80)) for service in ALLOWED_SERVICES} if include_logs else {}
+    return {
+        "ok": ok,
+        "plan": "daily_operations_report",
+        "sections": {
+            "infrastructure": infrastructure,
+            "fiscal": fiscal,
+            "products_fiscal_audit": products,
+            "nightly_health": nightly,
+            "logs": logs,
+        },
+        "summary": {
+            "services_ok": infrastructure.get("ok"),
+            "fiscal_ok": fiscal.get("ok"),
+            "products_metadata_ok": products.get("ok"),
+        },
+    }
+
+
+def _catalog() -> dict[str, Any]:
+    return {"ok": True, "plan": "catalog", "available_plans": PLAN_CATALOG, "allowed_services": list(ALLOWED_SERVICES), "deploy_root": str(ALLOWED_DEPLOY_ROOT), "backup_dir": str(BACKUP_DIR)}
+
+
+@router.post(
+    "/admin/plan/execute",
+    summary="Executar plano operacional",
+    description=(
+        "Endpoint principal para listar e executar planos operacionais do Agente Divina. "
+        "Use o plano 'catalog' para descobrir os planos disponíveis e, em seguida, execute "
+        "planos como 'diagnose', 'validate_v2', 'restart_v2', 'backup_v2', 'deploy_v2', "
+        "'rollback_v2' ou 'nightly_health'."
+    ),
+)
+def admin_plan_execute(
+    payload: AdminPlanExecuteRequest,
+    credentials: HTTPAuthorizationCredentials | None = Security(bearerAuth),
+):
+    _require_admin(credentials)
+
+    if payload.plan == "catalog":
+        result = _catalog()
+    elif payload.plan == "diagnose":
+        result = _diagnose(payload.include_logs, payload.log_lines)
+    elif payload.plan == "validate_v2":
+        result = _validate_v2()
+    elif payload.plan == "restart_v2":
+        result = _restart_v2(payload.include_logs, payload.log_lines)
+    elif payload.plan == "backup_v2":
+        result = _backup_v2(payload.label)
+    elif payload.plan == "deploy_v2":
+        result = _deploy_v2(payload.package_path, payload.include_logs, payload.log_lines)
+    elif payload.plan == "rollback_v2":
+        result = _rollback_v2(payload.backup_path, payload.include_logs, payload.log_lines)
+    elif payload.plan == "nightly_health":
+        result = _diagnose(False, 20)
+        result["plan"] = "nightly_health"
+    else:
+        raise HTTPException(status_code=400, detail="plano não suportado")
+
+    _audit("plan.execute", {"plan": payload.plan, "ok": result.get("ok")})
+    return result

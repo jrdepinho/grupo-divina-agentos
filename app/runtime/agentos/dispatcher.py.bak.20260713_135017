@@ -1,0 +1,22 @@
+import app.runtime.agentos
+
+from app.runtime.agentos.registry import get
+
+
+def execute(plan):
+    results = []
+
+    for step in plan:
+
+        cap = get(step["action"])
+
+        if cap is None:
+            results.append({
+                "ok": False,
+                "error": f"Capability {step['action']} não encontrada"
+            })
+            continue
+
+        results.append(cap.handler(**step["args"]))
+
+    return results

@@ -1,0 +1,368 @@
+from __future__ import annotations
+
+import datetime
+import json
+import os
+import signal
+import subprocess
+import uuid
+from pathlib import Path
+from typing import Any, Callable
+
+from fastapi import HTTPException
+
+JOB_DIR = Path("/opt/agente-divina/logs/jobs")
+JOB_DIR.mkdir(parents=True, exist_ok=True)
+DEFAULT_MAX_SECONDS = 900
+
+
+
+def _now() -> str:
+    return datetime.datetime.now().isoformat()
+
+
+def _job_paths(job_id: str) -> dict[str, Path]:
+    root = JOB_DIR / job_id
+    return {
+        "root": root,
+        "status": root / "status.json",
+        "stdout": root / "stdout.log",
+        "stderr": root / "stderr.log",
+        "exit": root / "exitcode.txt",
+        "script": root / "run.sh",
+    }
+
+
+def _read_status(job_id: str) -> dict[str, Any]:
+    paths = _job_paths(job_id)
+    if not paths["status"].exists():
+        raise HTTPException(404, f"job não encontrado: {job_id}")
+    status = json.loads(paths["status"].read_text(encoding="utf-8"))
+    exit_path = paths["exit"]
+    if exit_path.exists():
+        try:
+            exitcode = int(exit_path.read_text().strip())
+        except Exception:
+            exitcode = None
+        status["state"] = "completed" if exitcode == 0 else "failed"
+        status["exitcode"] = exitcode
+        if not status.get("finished_at"):
+            status["finished_at"] = _now()
+            paths["status"].write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+        return status
+
+    if status.get("state") == "running" and status.get("pid"):
+        max_seconds = int(status.get("max_seconds") or DEFAULT_MAX_SECONDS)
+        try:
+            created = datetime.datetime.fromisoformat(str(status.get("created_at")))
+            elapsed = (datetime.datetime.now() - created).total_seconds()
+        except Exception:
+            elapsed = 0
+        status["elapsed_sec"] = round(elapsed, 2)
+        if max_seconds and elapsed > max_seconds:
+            try:
+                os.killpg(int(status["pid"]), signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except Exception as exc:
+                status["timeout_kill_error"] = str(exc)
+            paths["exit"].write_text("124", encoding="utf-8")
+            status["state"] = "failed"
+            status["exitcode"] = 124
+            status["finished_at"] = _now()
+            status["error"] = f"job excedeu max_seconds={max_seconds}"
+        paths["status"].write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+    return status
+
+
+def _tail(path: Path, limit: int = 8000) -> str:
+    if not path.exists():
+        return ""
+    data = path.read_text(errors="replace")
+    return data[-limit:]
+
+
+def _create_job_record(name: str, command: str, cwd: str = "/opt/agente-divina-v2", max_seconds: int = DEFAULT_MAX_SECONDS) -> dict[str, Any]:
+    job_id = f"{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    paths = _job_paths(job_id)
+    paths["root"].mkdir(parents=True, exist_ok=True)
+    status = {
+        "ok": True,
+        "job_id": job_id,
+        "name": name,
+        "state": "queued",
+        "pid": None,
+        "cwd": cwd,
+        "created_at": _now(),
+        "command": command,
+        "max_seconds": max_seconds,
+        "paths": {k: str(v) for k, v in paths.items()},
+    }
+    paths["status"].write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+    return status
+
+
+def _start_systemd_worker_job(name: str, command: str, systemd_args: list[str], cwd: str = "/opt/agente-divina-v2") -> dict[str, Any]:
+    status = _create_job_record(name, command, cwd)
+    job_id = status["job_id"]
+    systemd_args = [job_id if x == "__JOB_ID_PLACEHOLDER__" else x for x in systemd_args]
+    unit = f"agente-job-{job_id}"
+    paths = _job_paths(job_id)
+    cmd = [
+        "systemd-run",
+        f"--unit={unit}",
+        "--on-active=5s",
+        "--property=User=root",
+        "--property=WorkingDirectory=/opt/agente-divina-v2",
+        "--property=StandardOutput=append:" + str(paths["stdout"]),
+        "--property=StandardError=append:" + str(paths["stderr"]),
+        *systemd_args,
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    status["systemd_unit"] = unit
+    status["systemd_returncode"] = proc.returncode
+    status["systemd_stdout"] = proc.stdout
+    status["systemd_stderr"] = proc.stderr
+    if proc.returncode != 0:
+        status["state"] = "failed"
+        status["exitcode"] = proc.returncode
+        paths["exit"].write_text(str(proc.returncode), encoding="utf-8")
+    else:
+        status["state"] = "queued"
+    paths["status"].write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+    return status
+
+
+def _start_shell_job(name: str, command: str, cwd: str = "/opt/agente-divina-v2", max_seconds: int = DEFAULT_MAX_SECONDS) -> dict[str, Any]:
+    job_id = f"{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    paths = _job_paths(job_id)
+    paths["root"].mkdir(parents=True, exist_ok=True)
+
+    script = f"""#!/usr/bin/env bash
+set -o pipefail
+cd {cwd!r}
+(
+  {command}
+)
+code=$?
+echo "$code" > {str(paths['exit'])!r}
+exit $code
+"""
+    paths["script"].write_text(script, encoding="utf-8")
+    paths["script"].chmod(0o700)
+
+    stdout = paths["stdout"].open("wb")
+    stderr = paths["stderr"].open("wb")
+    proc = subprocess.Popen(["bash", str(paths["script"])], stdout=stdout, stderr=stderr, start_new_session=True)
+    stdout.close()
+    stderr.close()
+
+    status = {
+        "ok": True,
+        "job_id": job_id,
+        "name": name,
+        "state": "running",
+        "pid": proc.pid,
+        "cwd": cwd,
+        "created_at": _now(),
+        "command": command,
+        "max_seconds": max_seconds,
+        "paths": {k: str(v) for k, v in paths.items()},
+    }
+    paths["status"].write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+    return status
+
+
+def _service_restart_command(service: str, health_url: str | None = None, wait_seconds: int = 60) -> str:
+    health = health_url or "http://127.0.0.1:8000/openapi.json"
+    return f"""
+set -e
+echo '--- scheduled restart ---'
+echo 'service={service}'
+
+# O restart é disparado em subprocesso separado para evitar matar a requisição que criou o job.
+(systemctl restart {service}) &
+restart_pid=$!
+echo "restart_pid=$restart_pid"
+wait $restart_pid || true
+
+echo '--- wait service active ---'
+for i in $(seq 1 {wait_seconds}); do
+  state=$(systemctl is-active {service} || true)
+  echo "attempt=$i state=$state"
+  if [ "$state" = "active" ]; then
+    break
+  fi
+  sleep 1
+done
+
+state=$(systemctl is-active {service} || true)
+if [ "$state" != "active" ]; then
+  echo "service not active after wait: $state" >&2
+  exit 1
+fi
+
+echo '--- healthcheck ---'
+for i in $(seq 1 {wait_seconds}); do
+  code=$(curl -s -o /dev/null -w '%{{http_code}}' {health} || true)
+  echo "attempt=$i http=$code"
+  if [ "$code" = "200" ]; then
+    exit 0
+  fi
+  sleep 1
+done
+
+echo 'healthcheck failed for {health}' >&2
+exit 1
+"""
+
+
+def _frontend_validate_command(run_frontend_build: bool = True) -> str:
+    build = "npm run build" if run_frontend_build else "echo 'SKIP frontend build'"
+    return f"""
+set -e
+echo '--- frontend build ---'
+cd /opt/agente-divina-v2
+{build}
+
+echo '--- smoke test ---'
+TOKEN=$(grep AGENTE_ADMIN_TOKEN /opt/agente-divina/config/supabase.env | cut -d= -f2-)
+curl -s -X POST http://127.0.0.1:8000/admin/full-access \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{{"operation":"smoke_test"}}'
+
+echo
+echo '--- browser login ---'
+curl -s -X POST http://127.0.0.1:8000/admin/full-access \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{{"operation":"browser_flow","args":{{"flow":"login","login":"jrdepinho","password":"12345678","timeout":20000}}}}'
+
+echo
+echo '--- browser erp ---'
+curl -s -X POST http://127.0.0.1:8000/admin/full-access \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{{"operation":"browser_flow","args":{{"flow":"abrir_erp","timeout":20000}}}}'
+"""
+
+
+def handle_jobs_op(req: Any, run_cmd: Callable[..., dict[str, Any]] | None = None) -> dict[str, Any] | None:
+    op = req.operation
+    if op not in {"job_start", "job_status", "job_logs", "job_cancel", "job_list", "service_restart_async", "execute_plan_async", "frontend_validate_async", "frontend_execute_plan_async"}:
+        return None
+
+    args = req.args or {}
+
+    if op == "job_start":
+        command = str(args.get("command") or req.command or "")
+        if not command:
+            raise HTTPException(400, "command obrigatório")
+        cwd = str(args.get("cwd") or "/opt/agente-divina-v2")
+        return _start_shell_job(str(args.get("name") or "custom"), command, cwd, int(args.get("max_seconds") or DEFAULT_MAX_SECONDS))
+
+    if op == "service_restart_async":
+        service = str(args.get("service") or getattr(req, "service", None) or "agente-divina-v2.service")
+        health_url = str(args.get("health_url") or "http://127.0.0.1:8000/openapi.json")
+        wait_seconds = int(args.get("wait_seconds") or 60)
+        command = _service_restart_command(service, health_url, wait_seconds)
+        return _start_systemd_worker_job(
+            f"restart_{service}",
+            command,
+            [
+                "/opt/agente-divina-v2/venv/bin/python",
+                "/opt/agente-divina-v2/scripts/service_restart_worker.py",
+                "__JOB_ID_PLACEHOLDER__",
+                service,
+                health_url,
+                str(wait_seconds),
+            ],
+            "/opt/agente-divina-v2",
+        )
+
+    if op == "execute_plan_async":
+        plan = str(args.get("plan") or req.content or "")
+        if not plan:
+            raise HTTPException(400, "args.plan obrigatório")
+        plan_args = dict(args)
+        plan_args.pop("async", None)
+        payload = {"operation": "execute_plan", "args": plan_args}
+        payload_json = json.dumps(payload, ensure_ascii=False)
+        return _start_systemd_worker_job(
+            f"execute_plan_{plan}",
+            payload_json,
+            [
+                "/opt/agente-divina-v2/venv/bin/python",
+                "/opt/agente-divina-v2/scripts/execute_plan_worker.py",
+                "__JOB_ID_PLACEHOLDER__",
+                payload_json,
+            ],
+            "/opt/agente-divina-v2",
+        )
+
+    if op in {"frontend_validate_async", "frontend_execute_plan_async"}:
+        run_frontend_build = bool(args.get("run_frontend_build", True))
+        return _start_shell_job("frontend_validate", _frontend_validate_command(run_frontend_build), "/opt/agente-divina-v2", int(args.get("max_seconds") or DEFAULT_MAX_SECONDS))
+
+    if op == "job_status":
+        job_id = str(args.get("job_id") or req.content or "")
+        if not job_id:
+            raise HTTPException(400, "job_id obrigatório")
+        status = _read_status(job_id)
+        paths = _job_paths(job_id)
+        return {
+            "ok": True,
+            "job": status,
+            "stdout_tail": _tail(paths["stdout"], int(args.get("limit") or req.limit or 8000)),
+            "stderr_tail": _tail(paths["stderr"], int(args.get("limit") or req.limit or 8000)),
+        }
+
+    if op == "job_logs":
+        job_id = str(args.get("job_id") or req.content or "")
+        if not job_id:
+            raise HTTPException(400, "job_id obrigatório")
+        paths = _job_paths(job_id)
+        if not paths["root"].exists():
+            raise HTTPException(404, f"job não encontrado: {job_id}")
+        limit = int(args.get("limit") or req.limit or 20000)
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "stdout_tail": _tail(paths["stdout"], limit),
+            "stderr_tail": _tail(paths["stderr"], limit),
+        }
+
+    if op == "job_cancel":
+        job_id = str(args.get("job_id") or req.content or "")
+        if not job_id:
+            raise HTTPException(400, "job_id obrigatório")
+        status = _read_status(job_id)
+        paths = _job_paths(job_id)
+        if status.get("state") in {"completed", "failed", "cancelled"}:
+            return {"ok": True, "job": status, "message": "job já finalizado"}
+        pid = int(status.get("pid") or 0)
+        if pid:
+            try:
+                os.killpg(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except Exception as exc:
+                raise HTTPException(500, f"falha ao cancelar job: {exc}")
+        paths["exit"].write_text("143", encoding="utf-8")
+        status["state"] = "cancelled"
+        status["cancelled_at"] = _now()
+        status["exitcode"] = 143
+        paths["status"].write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"ok": True, "job": status}
+
+    if op == "job_list":
+        jobs = []
+        for status_path in sorted(JOB_DIR.glob("*/status.json"), reverse=True)[: int(req.limit or args.get("limit") or 50)]:
+            try:
+                jobs.append(_read_status(status_path.parent.name))
+            except Exception:
+                pass
+        return {"ok": True, "count": len(jobs), "jobs": jobs}
+
+    return None

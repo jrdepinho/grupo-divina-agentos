@@ -1,0 +1,12 @@
+{
+  "bloqueio_motivo": "cStat 656 - Consumo Indevido",
+  "docZip_count": 0,
+  "maxNSU": "000000000000000",
+  "modo": "homologacao",
+  "proxima_consulta_liberada": "2026-06-19T21:46:36.406540+00:00",
+  "recomendar_nova_tentativa_apos_minutos": 70,
+  "ultNSU": "000000000025725",
+  "ultima_consulta": "2026-06-19T20:46:36.406540+00:00",
+  "ultimo_cstat": "656",
+  "xMotivo": "Rejeicao: Consumo Indevido (Deve ser utilizado o ultNSU nas solicitacoes subsequentes. Tente apos 1 hora)"
+}

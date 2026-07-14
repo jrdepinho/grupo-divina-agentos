@@ -1,0 +1,93 @@
+"""Configuration helpers for the Agente Divina API V2.
+
+Centraliza caminhos operacionais da V2 e mantém fallback temporário para a V1
+apenas durante a migração.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Mapping
+
+from dotenv import dotenv_values
+
+
+V2_ROOT = Path(os.getenv("AGENTE_DIVINA_V2_ROOT", "/opt/agente-divina-v2"))
+LEGACY_ROOT = Path(os.getenv("AGENTE_DIVINA_LEGACY_ROOT", "/opt/agente-divina"))
+
+CONFIG_DIR = V2_ROOT / "config"
+LEGACY_CONFIG_DIR = LEGACY_ROOT / "config"
+LOG_DIR = Path(os.getenv("AGENTE_DIVINA_LOG_DIR", str(LEGACY_ROOT / "logs")))
+BACKUP_DIR = Path(os.getenv("AGENTE_DIVINA_BACKUP_DIR", str(LEGACY_ROOT / "backups")))
+
+API_ENV_PATH = CONFIG_DIR / "api.env"
+SUPABASE_ENV_PATH = CONFIG_DIR / "supabase.env"
+LEGACY_API_ENV_PATH = LEGACY_CONFIG_DIR / "api.env"
+LEGACY_SUPABASE_ENV_PATH = LEGACY_CONFIG_DIR / "supabase.env"
+
+APP_CWD = str(V2_ROOT)
+DASHBOARD_CWD = "/opt/agente-divina-v2"
+FORNECEDORES_CWD = "/opt/agente-fornecedores"
+
+ADMIN_SHELL_LOG = LOG_DIR / "admin_shell.log"
+ADMIN_ACTIONS_LOG = LOG_DIR / "admin_actions.log"
+ADMIN_FULL_ACCESS_LOG = LOG_DIR / "admin_full_access.log"
+JOBS_DIR = LOG_DIR / "jobs"
+BROWSER_SCREENSHOT_DIR = LOG_DIR / "browser_screenshots"
+BROWSER_EVIDENCE_DIR = LOG_DIR / "browser_evidence"
+VENV_PYTHON = V2_ROOT / "venv" / "bin" / "python"
+LEGACY_APP_DIR = LEGACY_ROOT / "app"
+LEGACY_CONFIG_DIR_PATH = LEGACY_ROOT / "config"
+ALLOWED_ADMIN_ROOTS = (
+    V2_ROOT,
+    Path("/opt/agente-divina-v2"),
+    Path("/opt/agente-fornecedores"),
+    LEGACY_APP_DIR,
+)
+
+SEFAZ_FILES = {
+    "hogar_nsu": CONFIG_DIR / "hogar_nsu.txt",
+    "ttf_nsu": CONFIG_DIR / "ttf_nsu.txt",
+    "hogar_status": CONFIG_DIR / "hogar_status.json",
+    "ttf_status": CONFIG_DIR / "ttf_status.json",
+}
+
+LEGACY_SEFAZ_FILES = {
+    "hogar_nsu": LEGACY_CONFIG_DIR / "hogar_nsu.txt",
+    "ttf_nsu": LEGACY_CONFIG_DIR / "ttf_nsu.txt",
+    "hogar_status": LEGACY_CONFIG_DIR / "hogar_status.json",
+    "ttf_status": LEGACY_CONFIG_DIR / "ttf_status.json",
+}
+
+
+def existing_path(primary: Path, fallback: Path | None = None) -> Path:
+    if primary.exists():
+        return primary
+    if fallback and fallback.exists():
+        return fallback
+    return primary
+
+
+def load_env_file(primary: Path, fallback: Path | None = None) -> Mapping[str, str | None]:
+    return dotenv_values(existing_path(primary, fallback))
+
+
+def load_api_config() -> Mapping[str, str | None]:
+    return load_env_file(API_ENV_PATH, LEGACY_API_ENV_PATH)
+
+
+def load_supabase_config() -> Mapping[str, str | None]:
+    return load_env_file(SUPABASE_ENV_PATH, LEGACY_SUPABASE_ENV_PATH)
+
+
+def get_config_file(name: str) -> Path:
+    return existing_path(CONFIG_DIR / name, LEGACY_CONFIG_DIR / name)
+
+
+def get_sefaz_file(name: str) -> Path:
+    return existing_path(SEFAZ_FILES[name], LEGACY_SEFAZ_FILES.get(name))
+
+
+def get_env(name: str) -> str | None:
+    return os.getenv(name)

@@ -1,0 +1,65 @@
+def plan(goal: str):
+    g = goal.lower().strip()
+
+    plan = []
+
+    if any(x in g for x in (
+        "restart",
+        "reinicie",
+        "reiniciar",
+        "reinicia",
+    )):
+        plan.append({
+            "action": "service.restart",
+            "args": {
+                "service": "agente-divina-api.service"
+            }
+        })
+
+    elif any(x in g for x in (
+        "status",
+        "estado",
+        "situação",
+        "situacao",
+    )):
+        plan.append({
+            "action": "service.status",
+            "args": {
+                "service": "agente-divina-api.service"
+            }
+        })
+
+    elif any(x in g for x in (
+        "deploy",
+        "publicar",
+        "implantar",
+        "atualizar",
+    )):
+        plan.append({
+            "action": "deploy.validate",
+            "args": {}
+        })
+
+    elif any(x in g for x in (
+        "health",
+        "saúde",
+        "saude",
+        "diagnóstico",
+        "diagnostico",
+    )):
+        plan.append({
+            "action": "service.status",
+            "args": {
+                "service": "agente-divina-api.service"
+            }
+        })
+
+    if not plan:
+        plan.append({
+            "action": "goal.echo",
+            "args": {
+                "goal": goal
+            }
+        })
+
+    return plan

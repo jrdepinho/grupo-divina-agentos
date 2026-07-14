@@ -1,0 +1,15 @@
+from app.runtime.agentos.engine import run
+
+
+def run_goal(
+    goal,
+    mode="execute",
+    approval="auto",
+    context=None,
+):
+    return run(
+        goal=goal,
+        mode=mode,
+        approval=approval,
+        context=context,
+    )

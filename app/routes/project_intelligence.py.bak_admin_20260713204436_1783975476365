@@ -1,0 +1,227 @@
+from __future__ import annotations
+
+import json
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from fastapi import APIRouter, HTTPException, Security
+from fastapi.security import HTTPAuthorizationCredentials
+from pydantic import BaseModel, Field
+
+from app.auth import bearerAuth, verify_admin_token
+from app.project_intelligence.architecture import generate_architecture_from_context
+from app.project_intelligence.context_builder import build_project_context
+from app.project_intelligence.dispatcher import dispatch_capability, list_capabilities
+from app.project_intelligence.planner import PROJECT_INTELLIGENCE_SEQUENCE, build_project_intelligence_plan
+
+
+router = APIRouter(prefix="/project-intelligence", tags=["project_intelligence"])
+
+AUDIT_LOG = Path("/opt/agente-divina/logs/admin_actions.log")
+
+
+class ProjectScanRequest(BaseModel):
+    path: str | None = None
+    max_files: int = Field(default=5_000, ge=1, le=25_000)
+    module: str | None = None
+
+
+class CapabilityDispatchRequest(BaseModel):
+    capability: str
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+
+class GoalRequest(BaseModel):
+    goal: str
+    path: str | None = None
+    execute: bool = True
+    compact: bool = True
+    max_files: int = Field(default=5_000, ge=1, le=25_000)
+
+
+def _require_admin(credentials: HTTPAuthorizationCredentials | None) -> None:
+    verify_admin_token(credentials)
+
+
+def _audit(action: str, detail: dict[str, Any]) -> None:
+    event = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "action": action,
+        "detail": detail,
+    }
+    try:
+        AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with AUDIT_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _audit_payload(name: str, result: dict[str, Any], duration_ms: float) -> dict[str, Any]:
+    payload = result.get("result", result)
+    if not isinstance(payload, dict):
+        payload = {}
+    return {
+        "capability": name,
+        "duration_ms": duration_ms,
+        "files_analyzed": payload.get("files_analyzed"),
+        "modules_found": payload.get("modules_found") or len(payload.get("modules", []) or []),
+        "errors": payload.get("errors", []),
+        "warnings": payload.get("warnings", []),
+    }
+
+
+def _run(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    started = time.perf_counter()
+    result = dispatch_capability(name, payload)
+    duration_ms = round((time.perf_counter() - started) * 1000, 2)
+    _audit(f"project_intelligence.{name}", _audit_payload(name, result, duration_ms))
+    if not result.get("ok") and result.get("error") == "capability_not_found":
+        raise HTTPException(status_code=404, detail=result)
+    return result
+
+
+@router.get("/capabilities")
+def project_intelligence_capabilities(
+    credentials: HTTPAuthorizationCredentials | None = Security(bearerAuth),
+):
+    _require_admin(credentials)
+    return {
+        "ok": True,
+        "domain": "project_intelligence",
+        "capabilities": list_capabilities(),
+    }
+
+
+@router.post("/dispatch")
+def project_intelligence_dispatch(
+    payload: CapabilityDispatchRequest,
+    credentials: HTTPAuthorizationCredentials | None = Security(bearerAuth),
+):
+    _require_admin(credentials)
+    return _run(payload.capability, payload.parameters)
+
+
+@router.post("/project/scan")
+def project_scan(
+    payload: ProjectScanRequest,
+    credentials: HTTPAuthorizationCredentials | None = Security(bearerAuth),
+):
+    _require_admin(credentials)
+    return _run("project.scan", payload.model_dump())
+
+
+@router.post("/frontend/scan")
+def frontend_scan(
+    payload: ProjectScanRequest,
+    credentials: HTTPAuthorizationCredentials | None = Security(bearerAuth),
+):
+    _require_admin(credentials)
+    return _run("frontend.scan", payload.model_dump())
+
+
+@router.post("/backend/scan")
+def backend_scan(
+    payload: ProjectScanRequest,
+    credentials: HTTPAuthorizationCredentials | None = Security(bearerAuth),
+):
+    _require_admin(credentials)
+    return _run("backend.scan", payload.model_dump())
+
+
+@router.post("/database/scan")
+def database_scan(
+    payload: ProjectScanRequest,
+    credentials: HTTPAuthorizationCredentials | None = Security(bearerAuth),
+):
+    _require_admin(credentials)
+    return _run("database.scan", payload.model_dump())
+
+
+@router.post("/memory/search")
+def memory_search(
+    payload: ProjectScanRequest,
+    credentials: HTTPAuthorizationCredentials | None = Security(bearerAuth),
+):
+    _require_admin(credentials)
+    return _run("memory.search", payload.model_dump())
+
+
+@router.post("/git/inspect")
+def git_inspect(
+    payload: ProjectScanRequest,
+    credentials: HTTPAuthorizationCredentials | None = Security(bearerAuth),
+):
+    _require_admin(credentials)
+    return _run("git.inspect", payload.model_dump())
+
+
+@router.post("/architecture/generate")
+def architecture_generate(
+    payload: ProjectScanRequest,
+    credentials: HTTPAuthorizationCredentials | None = Security(bearerAuth),
+):
+    _require_admin(credentials)
+    return _run("architecture.generate", payload.model_dump())
+
+
+@router.post("/context/build")
+def context_build(
+    payload: ProjectScanRequest,
+    credentials: HTTPAuthorizationCredentials | None = Security(bearerAuth),
+):
+    _require_admin(credentials)
+    return _run("context.build", payload.model_dump())
+
+
+@router.post("/goal")
+def project_intelligence_goal(
+    payload: GoalRequest,
+    credentials: HTTPAuthorizationCredentials | None = Security(bearerAuth),
+):
+    _require_admin(credentials)
+    plan = build_project_intelligence_plan(payload.goal, payload.path)
+    if not plan["triggered"] or not payload.execute:
+        _audit("project_intelligence.goal.plan", {"goal": payload.goal, "triggered": plan["triggered"]})
+        return {"ok": True, "plan": plan, "executed": False}
+
+    started = time.perf_counter()
+    context = build_project_context(path=payload.path, module=plan.get("module"), max_files=payload.max_files)
+    architecture = generate_architecture_from_context(context)
+    duration_ms = round((time.perf_counter() - started) * 1000, 2)
+    _audit("project_intelligence.context.build", _audit_payload("context.build", context, context.get("duration_ms", duration_ms)))
+    _audit("project_intelligence.architecture.generate", _audit_payload("architecture.generate", architecture, architecture.get("duration_ms", duration_ms)))
+
+    completed_plan = {
+        **plan,
+        "plan": [{**step, "status": "completed"} for step in plan["plan"]],
+    }
+    _audit(
+        "project_intelligence.goal.execute",
+        {
+            "goal": payload.goal,
+            "module": plan.get("module"),
+            "capabilities": PROJECT_INTELLIGENCE_SEQUENCE,
+        },
+    )
+    if payload.compact:
+        return {
+            "ok": True,
+            "plan": completed_plan,
+            "executed": True,
+            "summary": architecture.get("summary"),
+            "markdown": architecture.get("markdown"),
+            "gaps": architecture.get("gaps"),
+            "roadmap": architecture.get("roadmap"),
+            "metrics": architecture.get("metrics"),
+        }
+    return {
+        "ok": True,
+        "plan": completed_plan,
+        "executed": True,
+        "result": architecture,
+        "project_context": context.get("project_context"),
+        "pipeline": PROJECT_INTELLIGENCE_SEQUENCE,
+    }

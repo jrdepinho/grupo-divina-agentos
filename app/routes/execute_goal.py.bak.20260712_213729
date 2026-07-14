@@ -1,0 +1,44 @@
+from fastapi import APIRouter
+from pydantic import BaseModel
+
+from app.agentos.goal_engine import (
+    capabilities,
+    health,
+    status,
+    version,
+)
+
+router = APIRouter(prefix="/agentos", tags=["AgentOS Goal"])
+
+
+class GoalRequest(BaseModel):
+    goal: str
+    mode: str = "execute"
+    approval: str = "auto"
+    risk_limit: str = "normal"
+
+
+@router.post("/execute-goal")
+def execute_goal(req: GoalRequest):
+
+    goal = req.goal.lower()
+
+    if "capabilities" in goal or "operações" in goal:
+        return capabilities()
+
+    if "health" in goal:
+        return health()
+
+    if "status" in goal:
+        return status()
+
+    if "version" in goal or "versão" in goal:
+        return version()
+
+    return {
+        "ok": True,
+        "goal": req.goal,
+        "mode": req.mode,
+        "message": "Goal recebido pelo Goal Engine.",
+        "capabilities": capabilities()
+    }

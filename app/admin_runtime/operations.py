@@ -1,0 +1,363 @@
+from pathlib import Path
+from .registry import register, runtime_catalog
+
+def arg(req, name, default=None):
+    if isinstance(req, dict):
+        return arg(req, name, default)
+    return getattr(req, name, default)
+
+
+ROOT = Path("/opt/agente-divina-v2")
+MEMORY = ROOT / "docs" / "project-memory"
+
+@register("catalog")
+def catalog(req):
+    return {
+        "ok": True,
+        "runtime": "agent-runtime-v1",
+        "operations": runtime_catalog()
+    }
+
+@register("bootstrap")
+def bootstrap(req):
+    docs = sorted(p.name for p in MEMORY.glob("*.md"))
+
+    essentials = [
+        "START_HERE.md",
+        "PROJECT_STATE.md",
+        "EXECUTION_PROTOCOL.md",
+        "DECISIONS.md",
+    ]
+
+    bootstrap_documents = {}
+
+    for name in essentials:
+        f = MEMORY / name
+        if f.exists():
+            bootstrap_documents[name] = f.read_text(encoding="utf-8")
+
+    return {
+        "ok": True,
+        "runtime": "agent-runtime-v1",
+        "status": "runtime ready",
+        "catalog": runtime_catalog(),
+        "project_root": str(ROOT),
+        "project_memory": str(MEMORY),
+        "documents": docs,
+        "bootstrap_documents": bootstrap_documents,
+    }
+@register("project_memory_read")
+def project_memory_read(req):
+    name = getattr(req, "path", None)
+    args = getattr(req, "args", None) or {}
+
+    if not MEMORY.exists():
+        return {
+            "ok": False,
+            "error": "project_memory_not_found",
+            "path": str(MEMORY),
+        }
+
+    # Leitura individual
+    if name:
+        file_path = (MEMORY / name).resolve()
+
+        try:
+            file_path.relative_to(MEMORY.resolve())
+        except ValueError:
+            return {
+                "ok": False,
+                "error": "invalid_path",
+                "path": name,
+            }
+
+        if not file_path.is_file():
+            return {
+                "ok": False,
+                "error": "file_not_found",
+                "path": str(file_path),
+            }
+
+        return {
+            "ok": True,
+            "path": str(file_path),
+            "content": file_path.read_text(encoding="utf-8"),
+        }
+
+    # Leitura de vários arquivos
+    requested_files = args.get("files")
+
+    if requested_files:
+        if not isinstance(requested_files, list):
+            return {
+                "ok": False,
+                "error": "args.files_must_be_a_list",
+            }
+
+        result = {}
+
+        for filename in requested_files:
+            if not isinstance(filename, str):
+                result[str(filename)] = {
+                    "ok": False,
+                    "error": "invalid_filename",
+                }
+                continue
+
+            file_path = (MEMORY / filename).resolve()
+
+            try:
+                file_path.relative_to(MEMORY.resolve())
+            except ValueError:
+                result[filename] = {
+                    "ok": False,
+                    "error": "invalid_path",
+                }
+                continue
+
+            if not file_path.is_file():
+                result[filename] = {
+                    "ok": False,
+                    "error": "file_not_found",
+                    "path": str(file_path),
+                }
+                continue
+
+            result[filename] = {
+                "ok": True,
+                "path": str(file_path),
+                "content": file_path.read_text(encoding="utf-8"),
+            }
+
+        return {
+            "ok": True,
+            "files": result,
+        }
+
+    # Sem parâmetros: listar os documentos disponíveis
+    return {
+        "ok": True,
+        "files": sorted(p.name for p in MEMORY.glob("*.md")),
+    }
+@register("engineering_audit")
+def engineering_audit(req):
+    return {
+        "ok": True,
+        "status": "runtime ready",
+        "project_root": str(ROOT)
+    }
+
+@register("mission_next")
+def mission_next(req):
+    return {
+        "ok": True,
+        "message": "Mission planner placeholder"
+    }
+
+
+
+@register("continue_session")
+def continue_session(req):
+    return {
+        "ok": True,
+        "runtime": {
+            "runtime": "agent-runtime-v1",
+            "status": "runtime ready",
+            "catalog": runtime_catalog(),
+        },
+        "bootstrap": bootstrap(req),
+        "project_memory": project_memory_read(req),
+        "audit": engineering_audit(req),
+        "mission": mission_next(req),
+    }
+
+
+
+
+@register("session_init")
+def session_init(req):
+    essentials = [
+        "START_HERE.md",
+        "PROJECT_STATE.md",
+        "EXECUTION_PROTOCOL.md",
+        "DECISIONS.md",
+        "ROADMAP.md",
+    ]
+
+    docs = {}
+
+    for name in essentials:
+        f = MEMORY / name
+        if f.exists():
+            docs[name] = {
+                "ok": True,
+                "path": str(f),
+                "content": f.read_text(encoding="utf-8"),
+            }
+
+    return {
+        "ok": True,
+        "runtime": {
+            "runtime": "agent-runtime-v1",
+            "status": "ready",
+            "operations": runtime_catalog(),
+        },
+        "bootstrap": bootstrap(req),
+        "project_memory": docs,
+        "engineering": engineering_audit(req),
+        "mission": mission_next(req),
+    }
+@register("continue")
+def continue_project(req):
+    return {
+        "ok": True,
+        "bootstrap": bootstrap(req),
+        "audit": engineering_audit(req),
+        "mission": mission_next(req)
+    }
+
+from pathlib import Path
+
+PROJECT_ROOT = Path("/opt/agente-divina-v2").resolve()
+
+
+def _resolve_path(p: str) -> Path:
+    full = (PROJECT_ROOT / p).resolve()
+
+    if not str(full).startswith(str(PROJECT_ROOT)):
+        raise ValueError("Access denied")
+
+    return full
+
+
+@register("exists")
+def exists(req):
+    p = _resolve_path(arg(req, "path"))
+    return {
+        "ok": True,
+        "exists": p.exists(),
+        "path": str(p),
+    }
+
+
+@register("list")
+def list_files(req):
+    p = _resolve_path(arg(req, "path", "."))
+
+    return {
+        "ok": True,
+        "items": sorted(x.name for x in p.iterdir())
+    }
+
+
+@register("read")
+def read(req):
+    p = _resolve_path(arg(req, "path"))
+
+    return {
+        "ok": True,
+        "path": str(p),
+        "content": p.read_text(encoding="utf-8")
+    }
+
+
+@register("write")
+def write(req):
+    p = _resolve_path(arg(req, "path"))
+
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+    p.write_text(
+        arg(req, "content", ""),
+        encoding="utf-8"
+    )
+
+    return {
+        "ok": True,
+        "path": str(p)
+    }
+
+
+@register("append")
+def append(req):
+    p = _resolve_path(arg(req, "path"))
+
+    with p.open("a", encoding="utf-8") as f:
+        f.write(arg(req, "content", ""))
+
+    return {
+        "ok": True,
+        "path": str(p)
+    }
+
+
+@register("replace")
+def replace(req):
+    p = _resolve_path(arg(req, "path"))
+
+    txt = p.read_text(encoding="utf-8")
+
+    txt = txt.replace(
+        arg(req, "find", ""),
+        arg(req, "replace", "")
+    )
+
+    p.write_text(txt, encoding="utf-8")
+
+    return {
+        "ok": True,
+        "path": str(p)
+    }
+
+
+@register("edit")
+def edit(req):
+    path = _resolve_path(arg(req, "path"))
+
+    old = arg(req, "old")
+    new = arg(req, "new")
+
+    text = path.read_text(encoding="utf-8")
+
+    if old not in text:
+        return {
+            "ok": False,
+            "error": "text_not_found"
+        }
+
+    text = text.replace(old, new, 1)
+
+    path.write_text(text, encoding="utf-8")
+
+    return {
+        "ok": True,
+        "path": str(path)
+    }
+
+
+@register("mkdir")
+def mkdir(req):
+    p = _resolve_path(arg(req, "path"))
+
+    p.mkdir(parents=True, exist_ok=True)
+
+    return {
+        "ok": True,
+        "path": str(p)
+    }
+
+
+@register("delete")
+def delete(req):
+    p = _resolve_path(arg(req, "path"))
+
+    if p.is_file():
+        p.unlink()
+    elif p.is_dir():
+        import shutil
+        shutil.rmtree(p)
+
+    return {
+        "ok": True
+    }
+

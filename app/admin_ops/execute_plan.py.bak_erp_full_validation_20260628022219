@@ -1,0 +1,342 @@
+from __future__ import annotations
+
+import datetime
+import json
+import shutil
+from pathlib import Path
+from typing import Any, Callable
+from types import SimpleNamespace
+
+from fastapi import HTTPException
+
+AUDIT_DIR = Path("/opt/agente-divina/logs/execute_plan")
+AUDIT_DIR.mkdir(parents=True, exist_ok=True)
+from app.admin_ops.smoke import handle_smoke_op
+from app.admin_ops.browser import handle_browser_op
+
+
+def _now() -> str:
+    return datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+
+
+def _backup(path: Path) -> Path | None:
+    if not path.exists():
+        return None
+    backup = path.with_suffix(path.suffix + f".bak-plan-{_now()}")
+    if path.is_dir():
+        shutil.copytree(path, backup)
+    else:
+        backup.write_bytes(path.read_bytes())
+    return backup
+
+
+def _restore(backups: list[dict[str, str | None]]) -> list[dict[str, str | None]]:
+    restored: list[dict[str, str | None]] = []
+    for item in reversed(backups):
+        target = Path(str(item["target"]))
+        backup = item.get("backup")
+        existed = bool(item.get("existed"))
+        try:
+            if existed and backup:
+                source = Path(str(backup))
+                if target.exists():
+                    if target.is_dir():
+                        shutil.rmtree(target)
+                    else:
+                        target.unlink()
+                if source.is_dir():
+                    shutil.copytree(source, target)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, target)
+                restored.append(item)
+            elif not existed and target.exists():
+                if target.is_dir():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink()
+                restored.append(item)
+        except Exception as exc:
+            restored.append({"target": str(target), "backup": backup, "restore_error": str(exc)})
+    return restored
+
+
+
+def _preset_steps(plan_name: str) -> list[dict[str, Any]]:
+    if plan_name in {"validation_pipeline", "validar_sistema", "validar_erp"}:
+        return [
+            {"action": "smoke_test"},
+            {"action": "browser_flow", "flow": "login", "args": {"login": "jrdepinho", "password": "12345678", "timeout": 20000}},
+            {"action": "browser_flow", "flow": "abrir_erp", "args": {"timeout": 20000}},
+        ]
+    if plan_name in {"validar_frontend", "frontend_validation"}:
+        return [
+            {"action": "smoke_test"},
+            {"action": "browser_flow", "flow": "login", "args": {"login": "jrdepinho", "password": "12345678", "timeout": 20000}},
+            {"action": "browser_flow", "flow": "abrir_produtos", "args": {"timeout": 20000}},
+        ]
+    if plan_name in {"validar_backend", "backend_validation"}:
+        return [
+            {"action": "py_compile", "path": "app/main.py app/routes/admin_full_access.py app/routes/compact.py app/admin_ops/*.py"},
+            {"action": "smoke_test"},
+        ]
+    if plan_name in {"validar_modulos_erp", "erp_modules_validation"}:
+        return [
+            {"action": "smoke_test"},
+            {"action": "browser_flow", "flow": "login", "args": {"login": "jrdepinho", "password": "12345678", "timeout": 20000}},
+            {"action": "browser_flow", "flow": "abrir_produtos", "args": {"timeout": 20000}},
+            {"action": "browser_flow", "flow": "abrir_financeiro", "args": {"timeout": 20000}},
+            {"action": "browser_flow", "flow": "abrir_fiscal", "args": {"timeout": 20000}},
+            {"action": "browser_flow", "flow": "abrir_xml", "args": {"timeout": 20000}},
+            {"action": "browser_flow", "flow": "abrir_compras", "args": {"timeout": 20000}},
+            {"action": "browser_flow", "flow": "abrir_estoque", "args": {"timeout": 20000}},
+        ]
+    if plan_name in {"validar_seguranca", "security_validation"}:
+        return [
+            {"action": "smoke_test"},
+            {"action": "browser_flow", "flow": "login", "args": {"login": "jrdepinho", "password": "12345678", "timeout": 20000}},
+            {"action": "browser_flow", "flow": "abrir_seguranca", "args": {"base_url": "http://127.0.0.1:3000", "timeout": 20000}},
+            {"action": "browser_flow", "flow": "seguranca_usuarios_validar", "args": {"base_url": "http://127.0.0.1:3000", "timeout": 25000}},
+            {"action": "browser_flow", "flow": "seguranca_perfis_validar", "args": {"base_url": "http://127.0.0.1:3000", "timeout": 25000}},
+            {"action": "browser_flow", "flow": "seguranca_permissoes_validar", "args": {"base_url": "http://127.0.0.1:3000", "timeout": 25000}},
+        ]
+    return []
+
+
+def _write_plan_audit(plan_name: str, report: dict[str, Any]) -> str:
+    path = AUDIT_DIR / f"{plan_name}-{_now()}.json"
+    path.write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    return str(path)
+
+def handle_execute_plan_op(
+    req: Any,
+    safe_path: Callable[[str], Path],
+    run_cmd: Callable[..., dict[str, Any]],
+) -> dict[str, Any] | None:
+    if req.operation not in {"execute_plan", "execute_plan_v2"}:
+        return None
+
+    args = req.args or {}
+    plan_name = args.get("plan") or req.content or "custom"
+    cwd = args.get("cwd") or "/opt/grupo-divina-dashboard"
+    stop_on_error = bool(args.get("stop_on_error", True))
+    rollback_on_error = bool(args.get("rollback_on_error", True))
+    steps = args.get("steps") or _preset_steps(str(plan_name))
+
+    if not isinstance(steps, list):
+        raise HTTPException(400, "args.steps deve ser uma lista")
+
+    backups: list[dict[str, str | None]] = []
+    report_steps: list[dict[str, Any]] = []
+
+    def fail(step_report: dict[str, Any]) -> dict[str, Any]:
+        restored = _restore(backups) if rollback_on_error else []
+        report = {
+            "ok": False,
+            "plan": plan_name,
+            "stopped_at": step_report.get("step"),
+            "rollback_executed": rollback_on_error,
+            "restored": restored,
+            "steps": report_steps,
+        }
+        report["audit_path"] = _write_plan_audit(str(plan_name), report)
+        return report
+
+    for index, step in enumerate(steps, start=1):
+        if not isinstance(step, dict):
+            step_report = {"index": index, "ok": False, "error": "step inválido"}
+            report_steps.append(step_report)
+            if stop_on_error:
+                return fail(step_report)
+            continue
+
+        action = str(step.get("action") or "").strip()
+        step_report: dict[str, Any] = {"index": index, "step": action, "ok": True}
+
+        try:
+            if action == "mkdir":
+                p = safe_path(str(step.get("path") or ""))
+                existed = p.exists()
+                backups.append({"target": str(p), "backup": None, "existed": existed})
+                p.mkdir(parents=True, exist_ok=True)
+                step_report["path"] = str(p)
+
+            elif action == "write_file":
+                p = safe_path(str(step.get("path") or ""))
+                existed = p.exists()
+                backup = _backup(p)
+                backups.append({"target": str(p), "backup": str(backup) if backup else None, "existed": existed})
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(str(step.get("content") or ""))
+                step_report["path"] = str(p)
+                step_report["backup"] = str(backup) if backup else None
+
+            elif action == "patch_file":
+                p = safe_path(str(step.get("path") or ""))
+                find = str(step.get("find") or "")
+                replace = str(step.get("replace") or "")
+                if not find:
+                    raise HTTPException(400, "find obrigatório")
+                text = p.read_text(errors="replace")
+                if find not in text:
+                    raise HTTPException(404, f"trecho não encontrado em {p}")
+                backup = _backup(p)
+                backups.append({"target": str(p), "backup": str(backup) if backup else None, "existed": True})
+                p.write_text(text.replace(find, replace, int(step.get("count") or 1)))
+                step_report["path"] = str(p)
+                step_report["backup"] = str(backup) if backup else None
+
+            elif action == "delete_file":
+                p = safe_path(str(step.get("path") or ""))
+                existed = p.exists()
+                backup = _backup(p)
+                backups.append({"target": str(p), "backup": str(backup) if backup else None, "existed": existed})
+                if p.exists():
+                    if p.is_dir():
+                        shutil.rmtree(p)
+                    else:
+                        p.unlink()
+                step_report["path"] = str(p)
+
+            elif action == "shell":
+                cmd = str(step.get("command") or "")
+                step_cwd = str(step.get("cwd") or cwd)
+                result = run_cmd(cmd, cwd=step_cwd)
+                step_report["result"] = result
+                if result.get("returncode") != 0:
+                    step_report["ok"] = False
+
+            elif action == "py_compile":
+                target = str(step.get("path") or ".")
+                result = run_cmd(f"python3 -m py_compile {target}", cwd=cwd)
+                step_report["result"] = result
+                if result.get("returncode") != 0:
+                    step_report["ok"] = False
+
+            elif action == "build":
+                result = run_cmd(str(step.get("command") or "npm run build"), cwd=str(step.get("cwd") or cwd))
+                step_report["result"] = result
+                if result.get("returncode") != 0:
+                    step_report["ok"] = False
+
+            elif action == "test":
+                result = run_cmd(str(step.get("command") or "npm test -- --watch=false"), cwd=str(step.get("cwd") or cwd))
+                step_report["result"] = result
+                if result.get("returncode") != 0:
+                    step_report["ok"] = False
+
+            elif action == "git_status":
+                step_report["result"] = run_cmd("git status --short", cwd=str(step.get("cwd") or cwd))
+
+            elif action == "git_diff":
+                step_report["result"] = run_cmd("git diff -- .", cwd=str(step.get("cwd") or cwd))
+
+            elif action == "commit":
+                message = str(step.get("message") or "chore: atualização operacional")
+                files = str(step.get("files") or ".")
+                result = run_cmd(f"git add {files} && git commit -m {message!r}", cwd=str(step.get("cwd") or cwd))
+                step_report["result"] = result
+                if result.get("returncode") not in (0, 1):
+                    step_report["ok"] = False
+
+            elif action == "push":
+                branch = str(step.get("branch") or "main")
+                result = run_cmd(f"git push origin {branch}", cwd=str(step.get("cwd") or cwd))
+                step_report["result"] = result
+                if result.get("returncode") != 0:
+                    step_report["ok"] = False
+
+            elif action == "healthcheck":
+                url = str(step.get("url") or "https://grupo-divina-dashboard.vercel.app/auth/login")
+                result = run_cmd(f"curl -s -I {url} | head -30", cwd=str(step.get("cwd") or cwd))
+                step_report["result"] = result
+                if result.get("returncode") != 0:
+                    step_report["ok"] = False
+
+            elif action == "smoke_test":
+                smoke_req = SimpleNamespace(
+                    operation="smoke_test",
+                    args=step.get("args") or {},
+                    path=None,
+                    content=None,
+                )
+                result = handle_smoke_op(smoke_req, run_cmd)
+                step_report["result"] = result
+                if not result or not result.get("ok"):
+                    step_report["ok"] = False
+
+            elif action == "browser_flow":
+                browser_args = dict(step.get("args") or {})
+                if step.get("flow") and not browser_args.get("flow"):
+                    browser_args["flow"] = step.get("flow")
+                browser_req = SimpleNamespace(
+                    operation="browser_flow",
+                    args=browser_args,
+                    path=step.get("url"),
+                    content=step.get("flow"),
+                )
+                result = handle_browser_op(browser_req, run_cmd)
+                step_report["result"] = result
+                if not result or not result.get("ok"):
+                    step_report["ok"] = False
+
+            elif action == "browser_health":
+                browser_req = SimpleNamespace(
+                    operation="browser_health",
+                    args=step.get("args") or {"url": step.get("url")},
+                    path=step.get("url"),
+                    content=None,
+                )
+                result = handle_browser_op(browser_req, run_cmd)
+                step_report["result"] = result
+                if not result or not result.get("ok"):
+                    step_report["ok"] = False
+
+            elif action == "browser_screenshot":
+                browser_args = dict(step.get("args") or {})
+                if step.get("url") and not browser_args.get("url"):
+                    browser_args["url"] = step.get("url")
+                if step.get("name") and not browser_args.get("name"):
+                    browser_args["name"] = step.get("name")
+                browser_req = SimpleNamespace(
+                    operation="browser_screenshot",
+                    args=browser_args,
+                    path=step.get("url"),
+                    content=None,
+                )
+                result = handle_browser_op(browser_req, run_cmd)
+                step_report["result"] = result
+                if not result or not result.get("ok"):
+                    step_report["ok"] = False
+
+            elif action == "service_restart":
+                service = str(step.get("service") or "")
+                allowed = {"agente-divina-api.service", "agente-divina-v2.service", "nginx.service"}
+                if service not in allowed:
+                    raise HTTPException(403, "serviço não permitido")
+                result = run_cmd(f"systemctl restart {service}")
+                step_report["result"] = result
+
+            else:
+                raise HTTPException(400, f"ação não suportada: {action}")
+
+        except HTTPException as exc:
+            step_report["ok"] = False
+            step_report["error"] = exc.detail
+        except Exception as exc:
+            step_report["ok"] = False
+            step_report["error"] = str(exc)
+
+        report_steps.append(step_report)
+        if not step_report.get("ok") and stop_on_error:
+            return fail(step_report)
+
+    report = {
+        "ok": all(s.get("ok") for s in report_steps),
+        "plan": plan_name,
+        "rollback_executed": False,
+        "backups": backups,
+        "steps": report_steps,
+    }
+    report["audit_path"] = _write_plan_audit(str(plan_name), report)
+    return report

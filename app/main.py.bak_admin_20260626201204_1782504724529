@@ -1,0 +1,34 @@
+from __future__ import annotations
+
+from fastapi.routing import APIRoute
+
+from app.api import app
+from app.openapi import configure_openapi
+from app.openapi_gpt import register_openapi_gpt
+from app.routes.admin_secure import router as admin_secure_router
+from app.routes.deploy_secure import router as deploy_secure_router
+from app.routes.plan_secure import router as plan_secure_router
+
+
+def _remove_route(method: str, path: str) -> None:
+    normalized_method = method.upper()
+    app.router.routes = [
+        route
+        for route in app.router.routes
+        if not (
+            isinstance(route, APIRoute)
+            and route.path == path
+            and normalized_method in (route.methods or set())
+        )
+    ]
+
+
+# Replaces the older /admin/exec implementation with the stricter
+# AGENTE_ADMIN_TOKEN + whitelist implementation below.
+_remove_route("POST", "/admin/exec")
+
+app.include_router(admin_secure_router)
+app.include_router(deploy_secure_router)
+configure_openapi(app)
+register_openapi_gpt(app)
+

@@ -1,0 +1,39 @@
+from __future__ import annotations
+
+from typing import Any, Callable
+
+from fastapi import HTTPException
+
+ALLOWED_SERVICES = {
+    "agente-divina-api.service",
+    "agente-divina-v2.service",
+    "nginx.service",
+}
+
+
+def handle_services_op(req: Any, run_cmd: Callable[..., dict[str, Any]]) -> dict[str, Any] | None:
+    op = req.operation
+
+    if op in {"service_status", "systemd_status"}:
+        if req.service not in ALLOWED_SERVICES:
+            raise HTTPException(403, "serviço não permitido")
+        return {"ok": True, "result": run_cmd(f"systemctl status {req.service} --no-pager")}
+
+    if op in {"service_restart", "systemd_restart"}:
+        if req.service not in ALLOWED_SERVICES:
+            raise HTTPException(403, "serviço não permitido")
+        return {"ok": True, "result": run_cmd(f"systemctl restart {req.service}")}
+
+    if op == "service_logs":
+        if req.service not in ALLOWED_SERVICES:
+            raise HTTPException(403, "serviço não permitido")
+        limit = req.limit or 120
+        return {"ok": True, "result": run_cmd(f"journalctl -u {req.service} -n {int(limit)} -l --no-pager")}
+
+    if op == "nginx_test":
+        return {"ok": True, "result": run_cmd("nginx -t")}
+
+    if op == "nginx_reload":
+        return {"ok": True, "result": run_cmd("systemctl reload nginx.service")}
+
+    return None

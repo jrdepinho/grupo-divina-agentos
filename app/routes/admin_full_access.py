@@ -1,0 +1,246 @@
+import os, subprocess, datetime
+from pathlib import Path
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from app.admin_ops.project import handle_project_op
+from app.admin_ops.execute_plan import handle_execute_plan_op
+from app.admin_ops.filesystem import handle_filesystem_op
+from app.admin_ops.git import handle_git_op
+from app.admin_ops.services import handle_services_op
+from app.admin_ops.deploy import handle_deploy_op
+from app.admin_ops.smoke import handle_smoke_op
+from app.admin_ops.browser import handle_browser_op
+from app.admin_ops.frontend_project import handle_frontend_project_op
+from app.admin_ops.jobs import handle_jobs_op
+from app.admin_runtime.registry import dispatch_runtime
+from agentos.services.admin_service import AdminService
+import app.admin_runtime.load  # noqa: F401
+
+router = APIRouter()
+
+ALLOWED_ROOTS = [
+    Path("/opt/agente-divina-v2").resolve(),
+    Path("/opt/agente-divina-v2").resolve(),
+    Path("/opt/agente-divina/app").resolve(),
+]
+
+ALLOWED_SERVICES = [
+    "agente-divina-api.service",
+    "agente-divina-v2.service",
+    "nginx.service",
+]
+
+AUDIT_LOG = Path("/opt/agente-divina/logs/admin_full_access.log")
+AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+
+class AdminRequest(BaseModel):
+    operation: str
+    path: str | None = None
+    content: str | None = None
+    find: str | None = None
+    replace: str | None = None
+
+    old: str | None = None
+    new: str | None = None
+    command: str | None = None
+    service: str | None = None
+    recursive: bool | None = False
+    limit: int | None = 200
+    args: dict | None = None
+
+def audit(data, ok=True):
+    AUDIT_LOG.open("a").write(
+        f"{datetime.datetime.now().isoformat()} ok={ok} data={data}\n"
+    )
+
+def safe_path(path: str) -> Path:
+    if not path:
+        raise HTTPException(400, "path obrigatório")
+    p = Path(path)
+    if not p.is_absolute():
+        p = Path("/opt/agente-divina-v2") / p
+    p = p.resolve()
+    if not any(str(p).startswith(str(root)) for root in ALLOWED_ROOTS):
+        raise HTTPException(403, f"path fora das raízes permitidas: {p}")
+    return p
+
+HEAVY_SYNC_OPS = {
+    "shell", "npm_build", "npm_lint",
+    "frontend_project_build", "frontend_build",
+    "frontend_project_lint", "frontend_lint",
+    "frontend_project_validate", "frontend_validate",
+    "frontend_project_push", "frontend_push",
+}
+
+
+AGENTOS_COMMANDS = {
+    "cleanup_project",
+    "compile_project",
+    "validate_project",
+    "restart_worker",
+}
+
+
+def _as_async_job(req):
+    args = dict(req.args or {})
+    if args.get("sync") is True:
+        return None
+    op = req.operation
+
+
+    if op == "shell":
+        command = req.command or args.get("command") or ""
+        if not command:
+            raise HTTPException(400, "command obrigatório")
+        async_req = AdminRequest(operation="job_start", command=command, args={"name": args.get("name") or "shell_async", "cwd": args.get("cwd") or "/opt/agente-divina-v2"})
+        res = handle_jobs_op(async_req, run_cmd)
+        return {"ok": True, "accepted": True, "async": True, "operation": op, "job": res}
+    if op == "npm_build":
+        async_req = AdminRequest(operation="job_start", command="npm run build", args={"name": "npm_build_async", "cwd": "/opt/agente-divina-v2"})
+        res = handle_jobs_op(async_req, run_cmd)
+        return {"ok": True, "accepted": True, "async": True, "operation": op, "job": res}
+    if op == "npm_lint":
+        async_req = AdminRequest(operation="job_start", command="npm run lint", args={"name": "npm_lint_async", "cwd": "/opt/agente-divina-v2"})
+        res = handle_jobs_op(async_req, run_cmd)
+        return {"ok": True, "accepted": True, "async": True, "operation": op, "job": res}
+
+    if op in {"frontend_project_build", "frontend_build"}:
+        async_req = AdminRequest(operation="job_start", command="npm run build", args={"name": "frontend_build_async", "cwd": "/opt/agente-divina-v2"})
+        res = handle_jobs_op(async_req, run_cmd)
+        return {"ok": True, "accepted": True, "async": True, "operation": op, "job": res}
+    if op in {"frontend_project_lint", "frontend_lint"}:
+        async_req = AdminRequest(operation="job_start", command="npm run lint", args={"name": "frontend_lint_async", "cwd": "/opt/agente-divina-v2"})
+        res = handle_jobs_op(async_req, run_cmd)
+        return {"ok": True, "accepted": True, "async": True, "operation": op, "job": res}
+    if op in {"frontend_project_validate", "frontend_validate"}:
+        async_req = AdminRequest(operation="frontend_validate_async", args=args)
+        res = handle_jobs_op(async_req, run_cmd)
+        return {"ok": True, "accepted": True, "async": True, "operation": op, "job": res}
+    if op in {"frontend_project_push", "frontend_push"}:
+        branch = args.get("branch") or "main"
+        async_req = AdminRequest(operation="job_start", command=f"git push origin {branch}", args={"name": "frontend_push_async", "cwd": "/opt/agente-divina-v2"})
+        res = handle_jobs_op(async_req, run_cmd)
+        return {"ok": True, "accepted": True, "async": True, "operation": op, "job": res}
+    return None
+
+
+def run_cmd(cmd: str, cwd="/opt/agente-divina-v2"):
+    blocked = ["rm -rf /", "mkfs", "shutdown", "reboot", ":(){", "dd if=", "chmod -R 777 /"]
+    if any(b in cmd for b in blocked):
+        raise HTTPException(403, "comando bloqueado por segurança")
+    result = subprocess.run(
+        cmd,
+        shell=True,
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        timeout=120,
+    )
+    return {
+        "returncode": result.returncode,
+        "stdout": result.stdout[-8000:],
+        "stderr": result.stderr[-8000:],
+    }
+
+@router.post("/admin/full-access", operation_id="admin_full_access_v1")
+def admin_full_access(req: AdminRequest):
+    try:
+        op = req.operation
+
+        if op in AGENTOS_COMMANDS:
+            payload = dict(req.args or {})
+
+            result = AdminService.enqueue(
+                op,
+                payload,
+            )
+
+            audit(req.model_dump(), True)
+
+            return {
+                "ok": True,
+                "queued": True,
+                **result,
+            }
+
+
+
+
+        runtime_res = dispatch_runtime(req)
+        if runtime_res is not None:
+            audit(req.model_dump(), True)
+            return runtime_res
+
+        async_res = _as_async_job(req) if op in HEAVY_SYNC_OPS else None
+        if async_res is not None:
+            audit(req.model_dump(), True)
+            return async_res
+
+        delegated = handle_filesystem_op(req, safe_path)
+        if delegated is not None:
+            audit(req.model_dump(), True)
+            return delegated
+
+        delegated = handle_execute_plan_op(req, safe_path, run_cmd)
+        if delegated is not None:
+            audit(req.model_dump(), True)
+            return delegated
+
+        delegated = handle_project_op(req, safe_path, run_cmd)
+        if delegated is not None:
+            audit(req.model_dump(), True)
+            return delegated
+
+        delegated = handle_git_op(req, run_cmd)
+        if delegated is not None:
+            audit(req.model_dump(), True)
+            return delegated
+
+        delegated = handle_services_op(req, run_cmd)
+        if delegated is not None:
+            audit(req.model_dump(), True)
+            return delegated
+
+        delegated = handle_deploy_op(req, run_cmd)
+        if delegated is not None:
+            audit(req.model_dump(), True)
+            return delegated
+
+        delegated = handle_smoke_op(req, run_cmd)
+        if delegated is not None:
+            audit(req.model_dump(), True)
+            return delegated
+
+        delegated = handle_browser_op(req, run_cmd)
+        if delegated is not None:
+            audit(req.model_dump(), True)
+            return delegated
+
+        delegated = handle_frontend_project_op(req, run_cmd)
+        if delegated is not None:
+            audit(req.model_dump(), True)
+            return delegated
+
+        delegated = handle_jobs_op(req, run_cmd)
+        if delegated is not None:
+            audit(req.model_dump(), True)
+            return delegated
+
+        if op == "shell":
+            res = {"ok": True, "result": run_cmd(req.command or "")}
+
+        elif op == "npm_build":
+            res = {"ok": True, "result": run_cmd("npm run build")}
+
+        elif op == "npm_lint":
+            res = {"ok": True, "result": run_cmd("npm run lint")}
+
+        else:
+            raise HTTPException(400, f"operação não suportada: {op}")
+
+        audit(req.model_dump(), True)
+        return res
+
+    except Exception as e:
+        audit(req.model_dump(), False)
+        raise

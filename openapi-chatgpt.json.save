@@ -1,0 +1,183 @@
+openapi": "3.0.3",
+  "info": {
+    "title": "Agente Divina Runtime",
+    "description": "Runtime universal do Agente Divina.",
+    "version": "2.0.0"
+  },
+  "servers": [
+    {
+    "url": "https://agente.divinahomepy.com"
+   
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "health",
+        "summary": "Health Check",
+        "responses": {
+          "200": {
+            "description": "Servidor online",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/execute": {
+      "post": {
+        "operationId": "runtime_execute",
+        "summary": "Executa uma operação do runtime",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecuteRequest"
+              }
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Agente Divina Runtime",
+    "description": "Runtime universal do Agente Divina.",
+    "version": "2.0.0"
+  },
+  "servers":
+    {
+      "url": "https://agente.divinahomepy.com"
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "health_health_get",
+        "summary": "Health Check",
+        "responses": {
+          "200": {
+            "description": "Servidor online",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "ok"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/execute": {
+      "post": {
+        "operationId": "runtime_execute",
+        "summary": "Executa uma operação do runtime",
+        "requestBody": {
+          "requitrue,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecuteRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Operação executada com sucesso",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "runtime": {
+                      "type": "string"
+                    },                   "operations": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+  "schemas": {
+      "ExecuteRequest": {
+        "type": "object",
+        "required": [
+          "domain",
+          "operation"
+        ],
+        "properties": {
+          "domain": {
+            "type": "string",
+            "description": "admin, erp, fiscal, supabase..."
+          },
+          "operation": {
+            "type": "string"
+          },
+          "data": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  }
+}            }
+          }
+    },
+        "responses": {
+          "200": {
+            "description": "Operação executada",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+       

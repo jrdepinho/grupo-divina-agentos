@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtualenv
+venv/
+.env
+.env.*
+
+# Logs
+logs/
+*.log
+
+# SQLite
+*.db
+*.sqlite*
+
+# Backups
+*.bak
+*.backup
+backup/
+backups/
+backup-chatgpt/
+app.backup_*/
+
+# macOS
+.DS_Store
+._*
+
+# IDE
+.vscode/
+.idea/
+
+# Cache
+.pytest_cache/
+.mypy_cache/
+
+# Build
+dist/
+build/
+
+# Temporary
+tmp/
+
+# Wheels
+*.whl
+
+# SQLite
+agentos/data/
+*.db
+*.sqlite*
+
+# Temporary command outputs
+pect
+ystemctl*
+-fp*
+-ef*
+-n*
+
+# OpenAPI gerado
+openapi*.json
+
+# Arquivos temporários
+pect.getsourcefile*
