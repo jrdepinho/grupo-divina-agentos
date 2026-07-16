@@ -4,6 +4,7 @@ from datetime import datetime
 import traceback
 
 from app.runtime.agentos.registry import get
+from app.runtime.agentos.security.execution_policy import get_policy
 
 
 class DispatcherV2:
@@ -32,6 +33,14 @@ class DispatcherV2:
             }
 
             capability = get(action)
+
+            policy = get_policy(action)
+
+            entry["policy"] = {
+                "name": policy.name,
+                "risk": policy.risk.value,
+                "requires_confirmation": policy.requires_confirmation,
+            }
 
             if capability is None:
                 entry["error"] = f"Capability '{action}' não encontrada."
