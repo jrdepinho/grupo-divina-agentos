@@ -169,7 +169,7 @@ def run(
         {"steps": len(plan)},
     )
 
-    execution = dispatcher.execute(plan)
+    execution = dispatcher.execute(plan, session=session)
 
     session.add_event(
         "execution.finished",

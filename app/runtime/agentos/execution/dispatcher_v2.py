@@ -9,7 +9,7 @@ from app.runtime.agentos.security.execution_policy import get_policy
 
 class DispatcherV2:
 
-    def execute(self, plan):
+    def execute(self, plan, session=None):
 
         report = {
             "ok": True,
@@ -20,6 +20,16 @@ class DispatcherV2:
         }
 
         for step in plan:
+
+            if session:
+                session.add_event(
+                    "step.started",
+                    {
+                        "action": step["action"],
+                        "order": step.get("order"),
+                    },
+                )
+
 
             action = step["action"]
             args = step.get("args", {})
@@ -45,6 +55,15 @@ class DispatcherV2:
             if capability is None:
                 entry["error"] = f"Capability '{action}' não encontrada."
                 report["steps"].append(entry)
+
+                if session:
+                    session.add_event(
+                        "step.finished",
+                        {
+                            "action": action,
+                            "ok": entry["ok"],
+                        },
+                    )
                 report["errors"].append(entry)
                 report["ok"] = False
                 break
