@@ -17,17 +17,6 @@ RISK_LEVELS = {
     "unknown": 4,
 }
 
-APPROVED_VALUES = {
-    "approved",
-    "approve",
-    "confirm",
-    "confirmed",
-    "confirmado",
-    "autorizado",
-    "yes",
-    "sim",
-}
-
 
 def _risk_value(value: str) -> int:
     return RISK_LEVELS.get(str(value or "").lower(), 4)
