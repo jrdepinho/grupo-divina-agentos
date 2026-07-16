@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: agentos
+Version: 0.3.0
+Summary: AgentOS CLI
+Requires-Python: >=3.12

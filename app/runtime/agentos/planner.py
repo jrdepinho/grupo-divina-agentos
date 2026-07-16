@@ -2,6 +2,25 @@ from __future__ import annotations
 
 from typing import List, Dict
 
+from app.runtime.agentos.intent import (
+    Intent,
+    IntentRouter,
+)
+
+router = IntentRouter()
+
+from app.runtime.agentos.plans import (
+    build_status_plan,
+    build_restart_plan,
+    build_deploy_plan,
+    build_search_plan,
+    build_compile_plan,
+    build_create_code_plan,
+    build_patch_code_plan,
+)
+
+
+
 
 def step(action, **kwargs):
     return {
@@ -18,6 +37,7 @@ def contains(goal, *words):
 def plan(goal: str) -> List[Dict]:
 
     g = goal.lower().strip()
+    intent = router.detect(goal)
 
     p = []
 
@@ -25,30 +45,8 @@ def plan(goal: str) -> List[Dict]:
     # STATUS
     # ---------------------------------------------------
 
-    if contains(g,
-        "status",
-        "estado",
-        "health",
-        "diagnostico",
-        "diagnóstico",
-    ):
-
-        p.append(step(
-            "service.status",
-            service="agente-divina-api.service"
-        ))
-
-        p.append(step(
-            "service.logs",
-            service="agente-divina-api.service",
-            limit=100
-        ))
-
-        return p
-
-    # ---------------------------------------------------
-    # RESTART
-    # ---------------------------------------------------
+    if intent == Intent.STATUS:
+        return build_status_plan()
 
     if contains(g,
         "restart",
@@ -97,17 +95,16 @@ def plan(goal: str) -> List[Dict]:
     # COMPILAR
     # ---------------------------------------------------
 
-    if contains(g,
-        "compilar",
-        "compile",
-        "validar",
-    ):
+    
 
-        p.append(step("developer.compile"))
+    if intent == Intent.CREATE_CODE:
+        return build_create_code_plan(goal)
 
-        p.append(step("developer.validate"))
+    if intent == Intent.PATCH_CODE:
+        return build_patch_code_plan(goal)
 
-        return p
+    if intent == Intent.COMPILE:
+        return build_compile_plan()
 
     # ---------------------------------------------------
     # PESQUISAR

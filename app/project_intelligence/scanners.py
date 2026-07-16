@@ -17,6 +17,8 @@ DEFAULT_PROJECT_ROOTS = (
 
 IGNORED_DIRS = {
     ".git",
+    "backup",
+    "backups",
     ".idea",
     ".mypy_cache",
     ".next",
@@ -100,7 +102,20 @@ def resolve_project_root(path: str | None = None) -> Path:
 
 
 def _is_ignored(path: Path) -> bool:
-    return any(part in IGNORED_DIRS for part in path.parts)
+    for part in path.parts:
+        lower = part.lower()
+
+        if (
+            lower in IGNORED_DIRS
+            or lower.startswith("backup")
+            or lower.startswith("backups")
+            or lower.startswith("app.backup")
+            or lower.endswith(".backup")
+            or ".backup_" in lower
+        ):
+            return True
+
+    return False
 
 
 def _rel(path: Path, root: Path) -> str:
@@ -149,8 +164,21 @@ def _iter_files(root: Path, max_files: int = 5_000) -> ScanContext:
                 break
             if _is_ignored(item):
                 continue
-            if item.is_file():
-                files.append(item)
+            if not item.is_file():
+                continue
+
+            name = item.name.lower()
+
+            if (
+                name.endswith(".bak")
+                or ".bak_" in name
+                or name.endswith("~")
+                or name.endswith(".orig")
+                or name.endswith(".tmp")
+            ):
+                continue
+
+            files.append(item)
     except Exception as exc:
         errors.append(str(exc))
 
@@ -260,6 +288,7 @@ def scan_project(path: str | None = None, max_files: int = 5_000) -> dict[str, A
         "root": str(root),
         "duration_ms": round((time.perf_counter() - started) * 1000, 2),
         "files_analyzed": len(ctx.files),
+        "files": sorted(_rel(file_path, ctx.root) for file_path in ctx.files),
         "structure": _folder_tree(ctx),
         "modules": [{"name": name, "files": count} for name, count in modules.most_common()],
         "controllers": _paths_by_kind(ctx, ("controller", "controllers", "routes", "views.py", "api.py")),

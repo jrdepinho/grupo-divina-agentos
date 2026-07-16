@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
-
+from datetime import datetime, UTC
 from .planner import plan
 from .dispatcher import execute
 
@@ -16,7 +15,7 @@ def run(
 
     report = {
         "goal": goal,
-        "started_at": datetime.utcnow().isoformat() + "Z",
+        "started_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "attempts": [],
         "ok": False,
     }
@@ -33,6 +32,6 @@ def run(
             report["ok"] = True
             break
 
-    report["finished_at"] = datetime.utcnow().isoformat() + "Z"
+    report["finished_at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
     return report

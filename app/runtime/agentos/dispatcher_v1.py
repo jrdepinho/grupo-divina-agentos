@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, UTC
 import traceback
 
 from .registry import get
@@ -10,7 +10,7 @@ def execute(plan):
 
     report = {
         "ok": True,
-        "started_at": datetime.utcnow().isoformat() + "Z",
+        "started_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "finished_at": None,
         "steps": [],
         "errors": [],
@@ -66,7 +66,7 @@ def execute(plan):
             report["ok"] = False
             break
 
-    report["finished_at"] = datetime.utcnow().isoformat() + "Z"
+    report["finished_at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
     report["executed_steps"] = len(report["steps"])
     report["failed_steps"] = len(report["errors"])
