@@ -4,7 +4,20 @@ from collections.abc import Iterable, Mapping
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
-from app.runtime.agentos.planner import plan as legacy_plan
+from app.runtime.agentos.intent import (
+    Intent,
+    IntentRouter,
+)
+
+from app.runtime.agentos.plans import (
+    build_status_plan,
+    build_compile_plan,
+    build_create_code_plan,
+    build_patch_code_plan,
+)
+
+router = IntentRouter()
+
 from app.runtime.agentos.capability_metadata import get_metadata
 from app.runtime.agentos.planning.strategies.development_strategy import (
     DevelopmentStrategy,
@@ -144,4 +157,32 @@ class PlannerV2:
         if self.dev.matches(goal):
             return self._enrich(self.dev.build(goal))
 
-        return self._enrich(legacy_plan(goal))
+        g = goal.lower().strip()
+        intent = router.detect(goal)
+
+        if intent == Intent.STATUS:
+            return self._enrich(build_status_plan())
+
+        if intent == Intent.CREATE_CODE:
+            return self._enrich(build_create_code_plan(goal))
+
+        if intent == Intent.PATCH_CODE:
+            return self._enrich(build_patch_code_plan(goal))
+
+        if intent == Intent.COMPILE:
+            return self._enrich(build_compile_plan())
+
+        if g.startswith("buscar "):
+            return self._enrich([
+                {
+                    "action": "developer.search",
+                    "args": {"text": goal[7:]}
+                }
+            ])
+
+        return self._enrich([
+            {
+                "action": "goal.echo",
+                "args": {"goal": goal}
+            }
+        ])
