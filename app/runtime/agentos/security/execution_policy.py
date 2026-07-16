@@ -39,3 +39,40 @@ def get_policy(capability: str):
         capability,
         CapabilityPolicy(capability, RiskLevel.PRODUCTION, True),
     )
+
+
+from dataclasses import dataclass
+
+
+@dataclass
+class PolicyDecision:
+    allowed: bool
+    reason: str | None = None
+
+
+def evaluate(
+    capability: str,
+    approval: str = "auto",
+):
+    policy = get_policy(capability)
+
+    approved = str(approval).strip().lower() in {
+        "approved",
+        "approve",
+        "confirm",
+        "confirmed",
+        "confirmado",
+        "autorizado",
+        "yes",
+        "sim",
+    }
+
+    if policy.requires_confirmation and not approved:
+        return PolicyDecision(
+            allowed=False,
+            reason="requires_confirmation",
+        )
+
+    return PolicyDecision(
+        allowed=True,
+    )

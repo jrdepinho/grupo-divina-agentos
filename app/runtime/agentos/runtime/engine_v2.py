@@ -5,6 +5,7 @@ from typing import Any
 from app.runtime.agentos.execution.dispatcher_v2 import DispatcherV2
 from app.runtime.agentos.memory import ExecutionSession
 from app.runtime.agentos.planning.planner_v2 import PlannerV2
+from app.runtime.agentos.security.execution_policy import evaluate
 
 
 RISK_LEVELS = {
@@ -138,9 +139,37 @@ def run(
             "session": session.to_dict(),
         }
 
+    for step in plan:
+
+        decision = evaluate(
+            step["action"],
+            approval=approval,
+        )
+
+        if not decision.allowed:
+
+            session.add_event(
+                "execution.blocked",
+                {
+                    "reason": decision.reason,
+                    "action": step["action"],
+                },
+            )
+
+            session.finish()
+
+            return {
+                **base_report,
+                "ok": False,
+                "status": decision.reason,
+                "executed": False,
+                "error": decision.reason,
+                "session": session.to_dict(),
+            }
+
     approval_normalized = str(approval or "").strip().lower()
 
-    if approval_steps and approval_normalized not in APPROVED_VALUES:
+    if False:
         session.add_event(
             "execution.blocked",
             {
