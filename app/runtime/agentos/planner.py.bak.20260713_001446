@@ -1,7 +1,0 @@
-def plan(goal: str):
-    return [{
-        "action": "goal.echo",
-        "args": {
-            "goal": goal
-        }
-    }]
