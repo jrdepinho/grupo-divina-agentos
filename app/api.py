@@ -1,13 +1,32 @@
+from contextlib import asynccontextmanager
 from pydantic import BaseModel
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI
+from fastapi import Header, HTTPException
+from fastapi.staticfiles import StaticFiles
 from fastapi.openapi.utils import get_openapi
 import subprocess
 from dotenv import dotenv_values
 from app.routes.project_intelligence import router as project_intelligence_router
+from app.routes.project_inventory import router as project_inventory_router
+from app.routes.git_admin import router as git_admin_router
+from app.routes.architecture import router as architecture_router
+from app.routes.architecture_graph import router as architecture_graph_router
+from app.routes.impact import router as impact_router
+from app.routes.dependencies import router as dependencies_router
 from app.routes.execute_goal import router as execute_goal_router
+from app.routes.session import router as session_router
 from app.openapi_gpt import register_openapi_gpt
+from app.runtime.agentos.bootstrap import initialize
+
+
+
+@asynccontextmanager
+async def lifespan(app):
+    initialize()
+    yield
 
 app = FastAPI(
+    lifespan=lifespan,
     title="Agente Divina API",
     version="0.1.0",
     servers=[
@@ -17,6 +36,14 @@ app = FastAPI(
         }
     ]
 )
+
+app.mount(
+    "/static",
+    StaticFiles(directory="app/static"),
+    name="static",
+)
+
+
 
 def custom_openapi_divina_actions():
     if app.openapi_schema:
@@ -87,7 +114,21 @@ def custom_openapi_divina_actions():
 
 app.openapi = custom_openapi_divina_actions
 app.include_router(project_intelligence_router)
+app.include_router(project_inventory_router)
+app.include_router(git_admin_router)
+app.include_router(architecture_router)
+app.include_router(architecture_graph_router)
+app.include_router(impact_router)
+app.include_router(dependencies_router)
+from app.routes.git_admin import router as git_admin_router
+from app.routes.architecture import router as architecture_router
+from app.routes.architecture_graph import router as architecture_graph_router
+from app.routes.impact import router as impact_router
+from app.routes.dependencies import router as dependencies_router
+from app.routes.developer import router as developer_router
 app.include_router(execute_goal_router)
+app.include_router(session_router)
+app.include_router(developer_router)
 register_openapi_gpt(app)
 
 

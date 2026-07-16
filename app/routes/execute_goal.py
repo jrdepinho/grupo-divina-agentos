@@ -19,4 +19,5 @@ def execute_goal(req: GoalRequest):
         goal=req.goal,
         mode=req.mode,
         approval=req.approval,
+        risk_limit=req.risk_limit,
     )

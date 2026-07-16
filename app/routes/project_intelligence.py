@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from app.auth import bearerAuth, verify_admin_token
 from app.project_intelligence.architecture import generate_architecture_from_context
 from app.project_intelligence.context_builder import build_project_context
-from app.project_intelligence.dispatcher import dispatch_capability, list_capabilities
+from app.runtime.agentos.dispatch_adapter import dispatch_capability, list_capabilities
 from app.project_intelligence.planner import PROJECT_INTELLIGENCE_SEQUENCE, build_project_intelligence_plan
 
 

@@ -1,0 +1,53 @@
+openapi: 3.1.0
+
+info:
+  title: AgentOS Goal API
+  version: 1.0.0
+
+servers:
+  - url: https://agente.divinahomepy.com
+
+paths:
+
+  /agentos/execute-goal:
+
+    post:
+
+      operationId: execute_goal
+
+      summary: Executa um Goal no AgentOS
+
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+
+              required:
+                - goal
+
+              properties:
+
+                goal:
+                  type: string
+
+                mode:
+                  type: string
+                  enum:
+                    - plan
+                    - execute
+                  default: execute
+
+                approval:
+                  type: string
+                  default: auto
+
+                risk_limit:
+                  type: string
+                  default: normal
+
+      responses:
+
+        "200":
+          description: Resultado do Goal

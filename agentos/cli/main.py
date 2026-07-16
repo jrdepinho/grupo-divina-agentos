@@ -2,6 +2,7 @@ import argparse
 
 from agentos.mission.manager import MissionManager
 from agentos.memory.store import MemoryStore
+from app.runtime.execute_goal import run_goal
 
 
 def main():
@@ -13,6 +14,13 @@ def main():
     sub.add_parser("doctor")
     sub.add_parser("version")
     sub.add_parser("status")
+
+
+    goal = sub.add_parser("goal")
+    goal.add_argument("goal")
+    goal.add_argument("--mode", default="execute")
+    goal.add_argument("--approval", default="auto")
+
 
     mission = sub.add_parser("mission")
     ma = mission.add_subparsers(dest="action")
@@ -106,12 +114,24 @@ def main():
                 print(row)
             return
 
+
+    if args.command == "goal":
+
+        result = run_goal(
+            goal=args.goal,
+            mode=args.mode,
+            approval=args.approval,
+        )
+
+        print(result)
+        return
+
     if args.command == "doctor":
         print("OK")
         return
 
     if args.command == "version":
-        print("AgentOS 0.2")
+        print("AgentOS 0.3.0")
         return
 
     if args.command == "status":

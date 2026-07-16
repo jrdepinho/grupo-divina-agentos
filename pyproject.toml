@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentos"
+version = "0.3.0"
+description = "AgentOS CLI"
+requires-python = ">=3.12"
+
+[project.scripts]
+agentos = "agentos.cli.main:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agentos*", "app*"]

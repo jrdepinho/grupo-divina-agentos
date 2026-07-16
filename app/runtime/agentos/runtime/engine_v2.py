@@ -3,8 +3,10 @@ from __future__ import annotations
 from typing import Any
 
 from app.runtime.agentos.execution.dispatcher_v2 import DispatcherV2
-from app.runtime.agentos.memory import ExecutionSession
-from app.runtime.agentos.planning.planner_v2 import PlannerV2
+from app.runtime.agentos.memory import ExecutionSession, save_session
+from app.runtime.agentos.orchestrator.pipeline_builder import PipelineBuilder
+from app.runtime.agentos.bootstrap import initialize
+from app.runtime.agentos.project_intelligence import ProjectIntelligence
 
 
 RISK_LEVELS = {
@@ -25,6 +27,7 @@ APPROVED_VALUES = {
     "autorizado",
     "yes",
     "sim",
+    "auto",
 }
 
 
@@ -61,7 +64,13 @@ def run(
     approval: str = "auto",
     risk_limit: str = "normal",
     context: dict[str, Any] | None = None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
+
+    initialize()
+
+    if context is None:
+        context = ProjectIntelligence().build_context(goal)
 
     session = ExecutionSession(
         goal=goal,
@@ -70,10 +79,18 @@ def run(
         risk_limit=risk_limit,
     )
 
-    planner = PlannerV2()
+    if session_id:
+        session.session_id = session_id
+
+    save_session(session)
+
+    builder = PipelineBuilder()
     dispatcher = DispatcherV2()
 
-    plan = planner.build(goal)
+    plan = builder.build(
+        goal=goal,
+        context=context,
+    )
     session.plan = plan
 
     calculated_risk = _plan_risk(plan)
@@ -95,7 +112,7 @@ def run(
         "risk_limit": risk_limit,
         "calculated_risk": calculated_risk,
         "plan": plan,
-        "context": context or {},
+        "context": context,
     }
 
     if mode.lower() == "plan":
@@ -106,13 +123,12 @@ def run(
         session.finish()
 
         return {
-            **base_report,
             "ok": True,
             "status": "planned",
-            "executed": False,
+            "goal": goal,
             "approval_required": bool(approval_steps),
-            "approval_steps": approval_steps,
-            "session": session.to_dict(),
+            "executed": False,
+            "session_id": session.session_id,
         }
 
     if _risk_value(calculated_risk) > _risk_value(risk_limit):
@@ -127,15 +143,15 @@ def run(
         session.finish()
 
         return {
-            **base_report,
             "ok": False,
             "status": "blocked_by_risk",
+            "goal": goal,
             "executed": False,
             "error": (
                 f"Risco calculado '{calculated_risk}' excede "
                 f"o limite '{risk_limit}'."
             ),
-            "session": session.to_dict(),
+            "session_id": session.session_id,
         }
 
     approval_normalized = str(approval or "").strip().lower()
@@ -154,14 +170,13 @@ def run(
         session.finish()
 
         return {
-            **base_report,
             "ok": False,
             "status": "approval_required",
+            "goal": goal,
             "executed": False,
             "approval_required": True,
-            "approval_steps": approval_steps,
             "error": "O plano contém ações que exigem aprovação explícita.",
-            "session": session.to_dict(),
+            "session_id": session.session_id,
         }
 
     session.add_event(
@@ -169,7 +184,15 @@ def run(
         {"steps": len(plan)},
     )
 
+    save_session(session)
+
     execution = dispatcher.execute(plan)
+
+    final_result = None
+
+    if execution.get("steps"):
+        last = execution["steps"][-1]
+        final_result = last.get("result")
 
     session.add_event(
         "execution.finished",
@@ -179,13 +202,25 @@ def run(
             "failed_steps": execution.get("failed_steps", 0),
         },
     )
+    session.result = {
+        **execution,
+        "result": final_result,
+        "status": (
+            "completed"
+            if execution.get("ok")
+            else "failed"
+        ),
+    }
+
     session.finish()
+    save_session(session)
 
     return {
-        **base_report,
         "ok": execution.get("ok", False),
         "status": "completed" if execution.get("ok") else "failed",
+        "goal": goal,
         "executed": True,
-        "execution": execution,
-        "session": session.to_dict(),
+        "executed_steps": execution.get("executed_steps", 0),
+        "failed_steps": execution.get("failed_steps", 0),
+        "session_id": session.session_id,
     }

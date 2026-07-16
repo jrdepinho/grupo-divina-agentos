@@ -69,6 +69,12 @@ CAPABILITY_METADATA: dict[str, CapabilityMetadata] = {
         changes_data=True,
         requires_approval=True,
     ),
+    "developer.generate_patch": CapabilityMetadata(
+        name="developer.generate_patch",
+        domain="developer",
+        description="Gera patch para arquivo lido.",
+    ),
+
     "developer.patch": CapabilityMetadata(
         name="developer.patch",
         domain="developer",
@@ -94,6 +100,11 @@ CAPABILITY_METADATA: dict[str, CapabilityMetadata] = {
         risk="high",
         changes_data=True,
         requires_approval=True,
+    ),
+    "chat.complete": CapabilityMetadata(
+        name="chat.complete",
+        domain="llm",
+        description="Executa conversa direta com o modelo LLM.",
     ),
     "context.read": CapabilityMetadata(
         name="context.read",

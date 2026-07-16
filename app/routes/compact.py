@@ -162,15 +162,24 @@ def compact_admin(
     _auth_header(credentials)
 
     if operation in {"catalog", "diagnose", "validate_v2", "restart_v2", "backup_v2", "deploy_v2", "rollback_v2", "nightly_health"}:
-        body = {"plan": operation, **data}
-        return _local("POST", "/admin/plan/execute", credentials, body)
+        return {
+            "ok": False,
+            "detail": "plan_execute legado removido"
+        }
 
     if operation == "plan_execute":
-        return _local("POST", "/admin/plan/execute", credentials, data)
+        return {
+            "ok":False,
+            "detail":"plan_execute legado removido"
+        }
     if operation == "config_summary":
         return _local("GET", "/admin/config/summary", credentials)
     if operation == "capabilities":
-        return _local("GET", "/admin/capabilities", credentials)
+        from app.runtime.agentos.registry import list_capabilities
+        return {
+            "ok": True,
+            "capabilities": list_capabilities(),
+        }
     if operation == "service_status":
         return _local("POST", "/admin/service/status", credentials, data)
     if operation == "service_logs":
@@ -178,9 +187,15 @@ def compact_admin(
     if operation == "service_restart":
         return _local("POST", "/admin/service/restart", credentials, data)
     if operation == "nginx_test":
-        return _local("POST", "/admin/nginx/test", credentials, {})
+        return {
+            "ok": False,
+            "detail":"nginx_test removido da API segura"
+        }
     if operation == "nginx_reload":
-        return _local("POST", "/admin/nginx/reload", credentials, {})
+        return {
+            "ok": False,
+            "detail":"nginx_reload removido da API segura"
+        }
 
     raise HTTPException(status_code=400, detail={"erro": "operação administrativa não suportada", "operation": operation})
 
